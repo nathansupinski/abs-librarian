@@ -1,0 +1,6 @@
+{
+  "watch": ["gui.mjs", "src/"],
+  "ext": "mjs,js",
+  "ignore": ["gui/", "gui-dist/", "node_modules/"],
+  "exec": "node gui.mjs --no-open"
+}

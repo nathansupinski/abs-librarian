@@ -1,6 +1,6 @@
 {
   "name": "abs-librarian",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Reorganizes an Audiobookshelf library to the expected Author/[Series/]Title/audiofiles structure",
   "type": "module",
   "main": "reorganize.mjs",
@@ -9,11 +9,21 @@
   },
   "scripts": {
     "dry-run": "node reorganize.mjs",
-    "execute": "node reorganize.mjs --execute"
+    "execute": "node reorganize.mjs --execute",
+    "build:gui": "cd gui && npm install && npm run build",
+    "start:gui": "node gui.mjs",
+    "dev": "concurrently -n api,ui -c cyan,magenta \"nodemon\" \"cd gui && npm run dev\""
   },
   "keywords": ["audiobookshelf", "audiobooks", "organize", "library"],
   "license": "MIT",
+  "engines": { "node": ">=18.0.0" },
   "dependencies": {
+    "commander": "^14.0.0",
+    "express": "^5.2.0",
     "music-metadata": "^11.12.3"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0",
+    "nodemon": "^3.0.0"
   }
 }

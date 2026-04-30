@@ -1,4 +1,7 @@
 node_modules/
+gui/node_modules/
+gui-dist/
+.Recycle.Bin
 
 # Library-specific data files generated at runtime — do not commit
 plan.json
