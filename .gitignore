@@ -1,0 +1,5 @@
+node_modules/
+
+# Library-specific data files generated at runtime — do not commit
+plan.json
+execute.log

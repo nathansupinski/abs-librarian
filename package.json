@@ -1,0 +1,19 @@
+{
+  "name": "abs-librarian",
+  "version": "1.0.0",
+  "description": "Reorganizes an Audiobookshelf library to the expected Author/[Series/]Title/audiofiles structure",
+  "type": "module",
+  "main": "reorganize.mjs",
+  "bin": {
+    "abs-librarian": "./reorganize.mjs"
+  },
+  "scripts": {
+    "dry-run": "node reorganize.mjs",
+    "execute": "node reorganize.mjs --execute"
+  },
+  "keywords": ["audiobookshelf", "audiobooks", "organize", "library"],
+  "license": "MIT",
+  "dependencies": {
+    "music-metadata": "^11.12.3"
+  }
+}

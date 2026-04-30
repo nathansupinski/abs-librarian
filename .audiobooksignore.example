@@ -1,0 +1,19 @@
+# abs-librarian ignore rules
+# Works like .gitignore: patterns match filenames/paths relative to the Audiobooks root.
+# Trailing / = directories only. Lines starting with # are comments.
+
+# ── Tool files (never touch these) ───────────────────────────────────────────
+.claude/
+.audiobooksignore
+REORGANIZATION_GLOSSARY.md
+
+# ── NAS/sync system directories ──────────────────────────────────────────────
+.stfolder
+.Recycle.Bin/
+
+# ── Protected content ─────────────────────────────────────────────────────────
+Encrypted/
+
+# ── Audiobookshelf working directories ───────────────────────────────────────
+_NeedsReview/
+_non-audiobook/
