@@ -15,10 +15,11 @@ export function writePlan(planFile, plan) {
 // Returns a mutable plan state object + all the add* helpers.
 // Pass the result into scanner.mjs so state is local to each invocation.
 export function createPlanState() {
-  const planItems  = [];
-  const lookupLog  = [];
-  const duplicates = [];
-  const skipLog    = [];
+  const planItems       = [];
+  const lookupLog       = [];
+  const duplicates      = [];
+  const groupDuplicates = [];
+  const skipLog         = [];
 
   function _addItem(obj) {
     planItems.push({ id: `${obj.type[0]}${planItems.length}`, status: 'pending', ...obj });
@@ -48,25 +49,38 @@ export function createPlanState() {
   function addDuplicate(f1, f2, note, meta = {}) { duplicates.push({ f1, f2, note, ...meta }); }
   function addLookup(obj) { lookupLog.push(obj); }
 
+  // groupA / groupB: { files: string[], totalSize: number, description: string }
+  function addGroupDuplicate(groupA, groupB, note, opts = {}) {
+    groupDuplicates.push({
+      groupA, groupB, note,
+      groupALabel: opts.groupALabel || 'Group A',
+      groupBLabel: opts.groupBLabel || 'Group B',
+      recommendation: opts.recommendation ?? null,
+      resolution: null,
+    });
+  }
+
   return {
-    planItems, lookupLog, duplicates, skipLog,
+    planItems, lookupLog, duplicates, groupDuplicates, skipLog,
     addMove, addJunkMove, addJunkDelete, addBestGuess,
-    addSkip, addDuplicate, addLookup,
+    addSkip, addDuplicate, addGroupDuplicate, addLookup,
   };
 }
 
-export function buildPlanOutput({ planItems, lookupLog, duplicates, skipLog, ignoreFile }) {
+export function buildPlanOutput({ planItems, lookupLog, duplicates, groupDuplicates, skipLog, ignoreFile, settings }) {
   return {
     generatedAt: new Date().toISOString(),
     ignoreFile,
+    settings: settings || {},
     items: planItems,
     lookupLog,
     duplicates,
+    groupDuplicates: groupDuplicates || [],
     skipLog,
   };
 }
 
-export function writeGlossary(glossaryPath, { planItems, lookupLog, duplicates, skipLog, root, ignoreFile, ignoreRules }) {
+export function writeGlossary(glossaryPath, { planItems, lookupLog, duplicates, groupDuplicates, skipLog, root, ignoreFile, ignoreRules }) {
   const confirmed = planItems.filter(i => !i.bestGuess && !i.junk);
   const bestGuess = planItems.filter(i => i.bestGuess);
   const junkItems = planItems.filter(i => i.junk);
@@ -93,6 +107,7 @@ export function writeGlossary(glossaryPath, { planItems, lookupLog, duplicates, 
     `| Junk — delete (system files, empty dirs) | ${junkDel.length} |`,
     `| Junk — move to _misc/ (download artifacts) | ${junkMove.length} |`,
     `| Duplicates flagged | ${duplicates.length} |`,
+    `| Group duplicates (combined vs. chapters) | ${(groupDuplicates || []).length} |`,
     `| Lookups performed | ${lookupLog.length} |`,
     `| Skipped (ignore rules + hard-protected) | ${skipLog.length} |`,
     '',
@@ -167,6 +182,24 @@ export function writeGlossary(glossaryPath, { planItems, lookupLog, duplicates, 
   );
   duplicates.forEach(d =>
     lines.push(`| \`${esc(rel(d.f1))}\` | \`${esc(rel(d.f2))}\` | ${esc(d.note)} |`));
+
+  if ((groupDuplicates || []).length > 0) {
+    lines.push(
+      '', '---',
+      '## Group Duplicates (Combined vs. Chapters)',
+      '',
+      '> Folders containing both a single combined audiobook file and individual chapter files.',
+      '> Resolve in the GUI: choose which version to keep.',
+      '',
+      '| Group A (Combined) | Group B (Chapters) | Note |',
+      '|---|---|---|',
+    );
+    groupDuplicates.forEach(d => {
+      const aDesc = `${d.groupALabel}: ${d.groupA.files.length} file(s)`;
+      const bDesc = `${d.groupBLabel}: ${d.groupB.files.length} file(s)`;
+      lines.push(`| ${esc(aDesc)} | ${esc(bDesc)} | ${esc(d.note)} |`);
+    });
+  }
 
   lines.push(
     '', '---',

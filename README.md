@@ -71,7 +71,8 @@ node gui.mjs [--port 7000] [--no-open]
 - **Approve / skip** individual moves or entire groups (grouped by author → book → disc)
 - **Batch select** — shift-click a range, then approve or skip in one click
 - **Best-guess resolution** — accept the suggested destination, use `_NeedsReview/`, or pick a custom path with a directory browser
-- **Duplicate resolution** — side-by-side file comparison (size, bitrate, duration, codec, ID3 tags) with an auto-recommendation; confirm which copy to keep and a delete item is added to the plan automatically
+- **Duplicate resolution** — side-by-side file comparison (size, bitrate, duration, codec, ID3 tags) with an auto-recommendation; confirm which copy to keep and a plan item is added automatically (move or delete, depending on your duplicates folder setting)
+- **Group duplicate resolution** — for folders containing both a single combined audiobook file and individual chapter files, choose which version to keep; the discarded files are queued for move or deletion
 - **Execute options** — checkboxes for all execute flags; the GUI remembers which flags you had active
 
 All plan changes write back to `plan.json` immediately. The CLI and GUI can be used together — the CLI respects `approved`/`skipped` statuses set by the GUI.
@@ -98,6 +99,7 @@ Starts both the API server (nodemon, port 7000) and Vite dev server (port 5173) 
 | `--force-delete-audio-junk` | Bypass audio-extension safety check (rarely needed; `._*` forks are auto-detected) |
 | `--retry-failed` | Retry items that failed in a previous execute run |
 | `--ignore-file <path>` | Custom ignore file (default: `<root>/.audiobooksignore`) |
+| `--duplicates-folder <path>` | Move resolved duplicates to this folder instead of deleting them (stored in plan.json; also configurable in the GUI) |
 
 **Recommended (full cleanup):**
 
@@ -160,7 +162,12 @@ Paths matched by an ignore rule are left untouched and listed in the glossary Sk
 | System files (`.DS_Store`, `._*`, etc.) | Left in place | Deleted |
 | Download artifacts (`.nzb`, `.sfv`, `.URL`) | → `_misc/` subfolder | Deleted |
 | Empty directories | Left in place | Deleted |
-| Duplicates | Left in place (flagged) | Left in place |
+| Duplicates (resolved, delete mode) | Left in place | Deleted |
+| Duplicates (resolved, move mode) | → duplicates folder | → duplicates folder |
+| Duplicates (unresolved) | Left in place (flagged) | Left in place (flagged) |
+| Group duplicates (resolved, delete mode) | Left in place | Deleted |
+| Group duplicates (resolved, move mode) | → duplicates folder | → duplicates folder |
+| Group duplicates (unresolved) | Left in place (flagged) | Left in place (flagged) |
 | Ignore-matched paths | Always left in place | Always left in place |
 | `._*.mp3` Mac resource forks | Left in place | Deleted (auto-detected as non-audio) |
 
@@ -168,9 +175,11 @@ Paths matched by an ignore rule are left untouched and listed in the glossary Sk
 
 ## After Execution
 
-**Review `_NeedsReview/`** — files the script couldn't confidently place. The GUI's best-guess section or manual moves handle these.
+**Review `_NeedsReview/`** — files the script couldn't confidently place. Use the GUI's best-guess section or move manually.
 
-**Resolve duplicates** — use the GUI's Duplicates section to compare files and mark which to keep, or handle manually.
+**Resolve duplicates** — use the GUI's Duplicates section to compare files and mark which to keep. The discarded file is moved to the duplicates folder (if configured) or queued for deletion (requires `--delete-junk` at execute time). Configure the folder in the GUI's Options panel or via `--duplicates-folder` at dry-run time.
+
+**Resolve group duplicates** — the GUI's Group Duplicates section shows folders containing both a combined audiobook file and individual chapter files. Choose which version to keep; the discarded files are moved or queued for deletion on the next execute.
 
 **Rescan Audiobookshelf** — Settings → Libraries → (your library) → Scan Library.
 
@@ -199,14 +208,43 @@ FAIL   move     SomeBook: some error message
 
 ---
 
-## Special Cases Handled Automatically
+## Detection Rules
 
-- **Lee Child / Jack Reacher** — double-nested `Lee.Child.-.Jack.Reacher.NN.-.Title/` folders collapsed to `Lee Child/Jack Reacher/NN - Title/`
-- **Marion Chesney** — Agatha Raisin (`AR##`) and Hamish Macbeth (`HM##`) series codes parsed from folder names; partial disc folders (`XofY`) become `Disc N` subfolders
-- **Root-level MP3s** — ID3 tags read first; falls back to OpenLibrary API; ambiguous results → `_NeedsReview/`
+The scanner uses a modular rules engine. Rules live in `src/rules/` — any `.mjs` file with a default export extending `ScanRule` is auto-loaded. Rules run in priority order; the first rule that claims a directory stops the chain.
+
+**Built-in rules:**
+
+- **Dot-separated naming** (`dot-separated-format.mjs`) — folders named `Author.Name.-.Series.NN.-.Title` (any author, not just Lee Child) are reorganized to `Author/Series/NN - Title/`
+- **Series-code naming** (`series-code-format.mjs`) — M.C. Beaton `AR##`/`HM##` series codes and `Agatha Raisin NN - Title` patterns; partial disc folders (`XofY`) become `Disc N` subfolders
+- **Combined + chapters** (`combined-chapters-duplicate.mjs`) — detects folders containing both a single large combined audiobook and many individual chapter files; presents a group duplicate for user resolution
+- **Mismatched files** (`mismatched-files-in-folder.mjs`) — detects audio files whose ID3 album tag doesn't match their container folder name; moves each file to the correct `Author/Album/` location
+- **Root-level MP3s** — ID3 tags first; falls back to OpenLibrary API; ambiguous → `_NeedsReview/`
 - **Loose audio in author folders** — wrapped in a per-book subfolder using the ID3 album tag as the title
-- **Top-level book folders** — remapped to `Author/Title/` using a known-mapping table plus ID3 verification
-- **Mac AppleDouble resource forks** (`._*.mp3`) — always treated as junk regardless of extension
+- **Top-level book folders** — remapped via `user-mappings.json` + ID3 verification, or detected automatically via ID3 + OpenLibrary
+
+**Adding a new rule:** create `src/rules/my-rule.mjs` with a class extending `ScanRule` from `./BaseRule.mjs`, override `onBookDir` and/or `onAuthorDir`, return `true` when handled. No other changes needed.
+
+---
+
+## User Mappings
+
+`user-mappings.json` (at the project root) handles top-level folders whose names are book titles rather than author names. Edit it to add your own mappings without touching source code:
+
+```json
+{
+  "knownMisplaced": {
+    "The Golden Compass": {
+      "author": "Philip Pullman",
+      "series": "His Dark Materials",
+      "title": "The Golden Compass",
+      "confidence": "high",
+      "note": "Philip Pullman, His Dark Materials book 1"
+    }
+  }
+}
+```
+
+The file ships with several example entries. If the file is missing, the scanner falls through to the automatic ID3 + OpenLibrary detection path.
 
 ---
 
@@ -217,18 +255,23 @@ FAIL   move     SomeBook: some error message
 | `reorganize.mjs` | CLI entry point (thin wrapper) |
 | `gui.mjs` | GUI server entry point |
 | `src/cli.mjs` | Commander-based CLI — arg parsing, orchestrates core modules |
-| `src/gui-server.mjs` | Express API server + process runner (spawns dry-run/execute, SSE streaming) |
-| `src/core/constants.mjs` | `HARD_SKIP`, extension sets, `KNOWN_MISPLACED` |
-| `src/core/fs-utils.mjs` | `safeMove`, `deleteItem`, `copyTree`, `cleanEmptyShells`, `isAudio`, `statOf`, etc. |
+| `src/gui-server.mjs` | Express API server + process runner (dry-run/execute, SSE streaming) |
+| `src/core/constants.mjs` | `HARD_SKIP`, extension sets (`AUDIO_EXTS`, `JUNK_EXTS`, `SYSTEM_NAMES`) |
+| `src/core/fs-utils.mjs` | `safeMove`, `deleteItem`, `copyTree`, `cleanEmptyShells`, `isAudio`, etc. |
 | `src/core/ignore.mjs` | `loadIgnoreFile`, `matchedIgnoreRule` |
-| `src/core/metadata.mjs` | `readTags` (with full ID3/format mode), `recommendDuplicate`, `searchOpenLibrary` |
-| `src/core/plan.mjs` | `readPlan`, `writePlan` (atomic), `createPlanState`, `writeGlossary` |
-| `src/core/scanner.mjs` | `runDryScan` — three-pass scan, all special handlers |
+| `src/core/metadata.mjs` | `readTags`, `recommendDuplicate`, `searchOpenLibrary` |
+| `src/core/plan.mjs` | `createPlanState`, `writePlan` (atomic), `buildPlanOutput`, `writeGlossary` |
+| `src/core/scanner.mjs` | `runDryScan` — three-pass scan, rule runner, classifier helpers |
 | `src/core/executor.mjs` | `runExecute` — processes plan items, writes execute.log |
+| `src/core/user-mappings.mjs` | Loads `user-mappings.json` from project root |
+| `src/rules/BaseRule.mjs` | Abstract base class for scan rules |
+| `src/rules/loader.mjs` | Auto-discovers and loads all rule files |
+| `src/rules/*.mjs` | Individual rule implementations |
 | `gui/` | Vite + React frontend source |
 | `gui-dist/` | Built frontend — gitignored, generated by `npm run build:gui` |
+| `user-mappings.json` | User-editable folder-name→author mappings (replaces hardcoded list) |
 | `nodemon.json` | Nodemon config for `npm run dev` |
-| `package.json` | Root package — `commander`, `express`, `music-metadata`; dev: `concurrently`, `nodemon` |
+| `package.json` | Root package — `commander`, `express`, `music-metadata` |
 | `.audiobooksignore.example` | Template ignore file — copy to your Audiobooks root |
 | `CLAUDE.md` | Technical reference for AI-assisted development |
 | `plan.json` | Generated at runtime — gitignored |

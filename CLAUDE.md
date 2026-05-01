@@ -1,10 +1,10 @@
 # abs-librarian — Developer Reference
 
-This file is the technical reference for AI-assisted development on this project. It documents non-obvious architecture decisions, edge cases, and invariants that aren't evident from reading the code.
+Technical reference for AI-assisted development. Documents non-obvious architecture decisions, edge cases, and invariants not evident from reading the code.
 
 ## What This Tool Does
 
-Reorganizes an Audiobookshelf library from ad-hoc structures to the expected `Author/[Series/]Title/audiofiles` convention. Runs dry-run first (generates a human-reviewable plan), then execute. Never deletes real audio files.
+Reorganizes an Audiobookshelf library from ad-hoc structures to `Author/[Series/]Title/audiofiles`. Runs dry-run first (generates a human-reviewable plan), then execute. Never deletes real audio files.
 
 ## Architecture Overview
 
@@ -14,30 +14,27 @@ Modular Node.js ESM project. Thin entry-point wrappers delegate to `src/`:
 - `gui.mjs` → `src/gui-server.mjs` (Express API + SSE process runner)
 
 Two top-level modes controlled by `--execute`:
-- **Dry-run**: three-pass scan → builds in-memory plan state → writes `plan.json` + `REORGANIZATION_GLOSSARY.md`
+- **Dry-run**: three-pass scan → rules engine → builds in-memory plan state → writes `plan.json` + `REORGANIZATION_GLOSSARY.md`
 - **Execute**: reads `plan.json`, processes each item, writes status back after every item (for restartability)
 
 ### Path Resolution (`src/cli.mjs`)
 
 ```javascript
-const scriptDir  = path.dirname(new URL(import.meta.url).pathname); // src/
 const planFile   = path.join(scriptDir, '..', 'plan.json');         // project root
 const executeLog = path.join(scriptDir, '..', 'execute.log');       // project root
 const glossary   = path.join(root, 'REORGANIZATION_GLOSSARY.md');   // library root
 const ignoreFile = opts.ignoreFile ?? path.join(root, '.audiobooksignore');
 ```
 
-`plan.json` and `execute.log` live next to the project root, not in the library.
-
 ### Three-Pass Scan (`src/core/scanner.mjs`)
 
-`runDryScan(root, { planFile, glossaryPath, ignoreFile })` runs three passes:
+`runDryScan` loads rules from `src/rules/` at startup, then runs three passes:
 
-1. **Pass 1 — Root files**: classifies each file at the library root. Audio files → ID3 tags + OpenLibrary fallback. Junk/system → junk DELETE.
-2. **Pass 2 — Top-level dirs**: for each directory: hard-skip check → ignore rule check → special handlers (Lee Child, Marion Chesney) → generic author dir processing. Author dirs are recursively scanned for loose audio (needs book subfolder) and junk.
-3. **Pass 3 — Empty dirs**: `scanForEmptyDirs(root)` walks the full tree looking for dirs not already in the plan that have no audio → junk DELETE.
+1. **Pass 1 — Root files**: classifies each file at the library root. Audio → ID3 tags + OpenLibrary fallback. Junk/system → DELETE.
+2. **Pass 2 — Top-level dirs**: hard-skip → ignore rules → `user-mappings.json` check → audio-at-root check → `processAuthorDir`.
+3. **Pass 3 — Empty dirs**: `scanForEmptyDirs` walks the full tree, marks dirs with no audio → DELETE.
 
-All scan helper functions are closures inside `runDryScan`, sharing the `planState` object returned by `createPlanState()`. This keeps state local to each invocation — no module-level shared state.
+All classifier functions are closures inside `runDryScan` sharing `planState` from `createPlanState()`. A `RuleContext` object (built once per scan) is passed to every rule hook — rules never import scanner internals directly.
 
 ### Plan Item Shape
 
@@ -45,41 +42,78 @@ All scan helper functions are closures inside `runDryScan`, sharing the `planSta
 {
   id,               // auto-generated: type prefix + index, e.g. "M0", "D5"
   type: 'MOVE_DIR' | 'MOVE_FILE',
-  source,           // absolute path
-  dest,             // absolute path (null for junk delete)
+  source, dest,     // absolute paths (dest null for junk delete)
   reason, notes,
   status: 'pending' | 'approved' | 'done' | 'skipped' | 'failed',
-  error,            // populated on failure
-  junk: bool,
-  action: 'move' | 'delete',
-  bestGuess: bool,
+  junk: bool, action: 'move' | 'delete', bestGuess: bool,
   fallbackDest,     // _NeedsReview/ path when bestGuess && !AUTO_ACCEPT_REVIEW
-  bestGuessNote,
+  bestGuessNote, error,
 }
 ```
 
-`approved` means the user explicitly confirmed this item in the GUI. Execute processes both `pending` and `approved`. `plan.json` is written atomically after every single item during execute — safe to interrupt and restart.
+`plan.json` is written atomically after every single item during execute — safe to interrupt and restart.
 
 ### Duplicate Record Shape
 
 ```javascript
+// Pairwise duplicate (two files, same content)
+{ f1, f2, note, f1Meta, f2Meta, recommendation, resolution }
+
+// Group duplicate (combined file vs. chapter collection)
 {
-  f1, f2,           // absolute paths
-  note,             // reason string
-  f1Meta, f2Meta,   // { artist, album, title, year, bitrate, duration, codec, size }
-  recommendation,   // 'f1' | 'f2' | null — set at scan time
-  resolution,       // { keep, deleteFile, resolvedAt } — set by GUI
+  groupA: { files: string[], totalSize: number, description: string },
+  groupB: { files: string[], totalSize: number, description: string },
+  note, groupALabel, groupBLabel, recommendation, resolution,
 }
 ```
 
-When the user resolves a duplicate in the GUI, a synthesized `DUP${index}` DELETE item is added to `plan.items`. Running `--execute --delete-junk` processes it.
+Resolving a pairwise duplicate synthesizes a `DUP${index}` plan item. Resolving a group duplicate synthesizes `GD${index}_${fileIndex}` items for all files in the discarded group. Whether each item is a DELETE (`junk: true, action: 'delete', dest: null`) or a MOVE (`junk: false, action: 'move', dest: <duplicatesFolder>/...`) depends on `plan.settings.duplicatesFolder` at resolution time.
 
 ### HARD_SKIP
 
-Dirs always skipped regardless of ignore file (exported from `src/core/constants.mjs`):
 ```javascript
 const HARD_SKIP = new Set(['_NeedsReview', '_non-audiobook', '.claude'])
 ```
+
+---
+
+## Rules System (`src/rules/`)
+
+Rules are auto-loaded at scan start. Any `.mjs` file with a default export extending `ScanRule` is automatically included — no registration needed.
+
+### Base Class (`src/rules/BaseRule.mjs`)
+
+```javascript
+export class ScanRule {
+  get name()     { return this.constructor.name; }
+  get priority() { return 100; }  // lower = runs first
+
+  // Return true to claim the directory (stops chain). Return false to pass.
+  async onBookDir(bookPath, bookName, authorName, authorPath, ctx) { return false; }
+  async onAuthorDir(authorPath, authorName, ctx)                   { return false; }
+}
+```
+
+### RuleContext
+
+Passed to every hook. Contains: `addMove`, `addJunkMove`, `addJunkDelete`, `addBestGuess`, `addSkip`, `addDuplicate`, `addGroupDuplicate`, `addLookup` (plan mutators); `root`, `relPath`, `checkIgnore`; `listDir`, `statOf`, `isAudio`, `isSystemFile`, `isJunkFile`, `hasAudioRecursive`, `isDoubleNested`; `readTags`, `recommendDuplicate`, `searchOpenLibrary`; `scanBookForJunk`.
+
+### Built-in Rules (priority order)
+
+| File | Priority | Pattern matched |
+|------|----------|-----------------|
+| `dot-separated-format.mjs` | 10 | `A.B.-.Series.NN.-.Title` — any author using dot-separated naming |
+| `series-code-format.mjs` | 20 | `M C Beaton - AR##/HM## Title [NofM]` + `Agatha Raisin NN - Title` |
+| `combined-chapters-duplicate.mjs` | 25 | One large combined file + many chapter files in same folder |
+| `mismatched-files-in-folder.mjs` | 30 | Audio files whose ID3 album tags don't match the container folder |
+
+### Adding a New Rule
+
+1. Create `src/rules/my-rule.mjs` with a default export extending `ScanRule`.
+2. Override `onBookDir` and/or `onAuthorDir`; return `true` if handled.
+3. Use `ctx.scanBookForJunk(bookPath, bookName, authorName, recursive)` before returning `true` to catch junk inside the directory.
+4. Call `ctx.addLookup({ filename, method, result, confidence, notes })` for audit trail.
+5. The loader picks it up automatically on next scan.
 
 ---
 
@@ -87,162 +121,78 @@ const HARD_SKIP = new Set(['_NeedsReview', '_non-audiobook', '.claude'])
 
 ### `src/core/constants.mjs`
 
-Exports: `HARD_SKIP` (Set), `NON_AUDIOBOOK_DIRS` (Set), `AUDIO_EXTS` (Set), `JUNK_EXTS` (Set), `SYSTEM_NAMES` (Set), `KNOWN_MISPLACED` (Map).
+Exports: `HARD_SKIP`, `NON_AUDIOBOOK_DIRS`, `AUDIO_EXTS`, `JUNK_EXTS`, `SYSTEM_NAMES`. `KNOWN_MISPLACED` has been removed — use `user-mappings.json` instead.
 
 ### `src/core/fs-utils.mjs`
 
-Exports: `listDir`, `statOf`, `isAudio`, `isSystemFile`, `isJunkFile`, `hasAudioRecursive`, `isDoubleNested`, `copyTree`, `verifyTree`, `removeTree`, `safeMove`, `deleteItem`, `cleanEmptyShells`.
+**`isSystemFile(name)`** — true for `SYSTEM_NAMES` members or `name.startsWith('._')`. The `._` prefix is Mac AppleDouble; always junk regardless of extension.
 
-**`isSystemFile(name)`**
-Returns true for `SYSTEM_NAMES` set members **or** `name.startsWith('._')`. The `._` prefix is the Mac AppleDouble resource fork convention — these files are always junk regardless of extension (e.g., `._foo.mp3` is not audio).
+**`safeMove(src, dest, root)`** — three cases: parent→child (EINVAL shuffle via sibling temp), same filesystem (atomic rename), cross-filesystem (EXDEV: copyTree + verifyTree + removeTree).
 
-**`safeMove(src, dest, root)`**
-Three cases:
-1. **Parent→child** (`dest.startsWith(src + '/')`): Linux `rename()` returns EINVAL. Fix: shuffle via sibling temp — `renameSync(src, src+'__reorg_tmp')`, `mkdirSync(src)`, `renameSync(tmp, dest)`. Restores tmp→src on error.
-2. **Same filesystem**: `renameSync` (atomic).
-3. **Cross-filesystem** (EXDEV, common on Unraid shfs union): `copyTree` + `verifyTree` (byte-size comparison per file) + `removeTree`.
-
-**`deleteItem(p, root, forceDeleteAudioJunk)`**
-Safety checks in order:
-1. Path must be inside `root` — hard throw otherwise.
-2. `._*` prefix → skip audio check (resource fork, never real audio regardless of extension).
-3. `isAudio(basename)` → throw unless `forceDeleteAudioJunk` set.
-
-**`cleanEmptyShells(dir, depth, { root, executeLog, hardSkip })`**
-Post-execute cleanup (only with `--delete-empty-shells`). Walks bottom-up. Removes a dir if it has no audio and all remaining files are system/junk/hidden. Never removes ROOT (depth 0 guard).
-
-### `src/core/ignore.mjs`
-
-**`loadIgnoreFile(filePath)`** → returns array of rule strings (or `[]` if file missing).
-
-**`matchedIgnoreRule(relPath, isDir, rules)`**
-Rules are passed as a parameter — not a module-level global. Rules:
-- Trailing `/`: dirs only
-- No `/` in pattern: match any path component at any depth
-- `/` in pattern: match full relative path from ROOT
-- Returns matching rule string or `null`
-
-**Important**: ignore rules are checked before ANY other classification. They always win over system/junk detection.
+**`deleteItem(p, root, forceDeleteAudioJunk)`** — safety checks: must be inside root, `._*` bypasses audio check, audio extension throws unless `forceDeleteAudioJunk` set.
 
 ### `src/core/metadata.mjs`
 
-**`readTags(filePath, full = false)`**
-- `full = false` (scan time): returns `{ artist, album }`
-- `full = true` (duplicate comparison): returns `{ artist, album, title, year, bitrate (kbps, rounded), duration (seconds, rounded), codec }`
+**`readTags(filePath, full = false)`** — `full=false`: `{ artist, album }`. `full=true`: adds `title, year, bitrate (kbps), duration (secs), codec`. Uses `music-metadata` v11 (ESM-only). Safe on parse failure.
 
-Uses `music-metadata` v11 (ESM-only). Always returns a safe object with null fields on parse failure.
+**`recommendDuplicate(m1, m2, stat1, stat2)`** → `'f1' | 'f2' | null`. Preference: higher bitrate → more ID3 tags → larger file.
 
-**`recommendDuplicate(m1, m2, stat1, stat2)`** → `'f1' | 'f2' | null`
-Preference order: higher bitrate → more complete ID3 tag count → larger file size.
-
-**`searchOpenLibrary(title)`** → `{ found, docs, ambiguous, error? }`
-Hits `https://openlibrary.org/search.json?title=...&fields=title,author_name&limit=3` with a 12s timeout.
+**`searchOpenLibrary(title)`** → `{ found, docs, ambiguous, error? }`. 12s timeout. `ambiguous` = top 2 results have different authors.
 
 ### `src/core/plan.mjs`
 
-**`createPlanState()`** — factory that returns isolated mutable state + helpers. Called once per `runDryScan` invocation; never shared between calls.
+**`createPlanState()`** — returns isolated mutable state + helpers. Returns: `{ planItems, lookupLog, duplicates, groupDuplicates, skipLog, addMove, addJunkMove, addJunkDelete, addBestGuess, addSkip, addDuplicate, addGroupDuplicate, addLookup }`.
 
-Returns: `{ planItems, lookupLog, duplicates, skipLog, addMove, addJunkMove, addJunkDelete, addBestGuess, addSkip, addDuplicate, addLookup }`.
+**`addGroupDuplicate(groupA, groupB, note, opts)`** — each group: `{ files, totalSize, description }`. Resolution synthesized by `gui-server.mjs`.
 
-`addDuplicate(f1, f2, note, meta = {})` — `meta` is spread in; pass `{ f1Meta, f2Meta, recommendation }` from the scanner.
+**`buildPlanOutput({ ..., settings })`** — includes `settings` (e.g. `{ duplicatesFolder }`) in the written plan. Scanner passes it through from CLI options or leaves it `{}`.
 
-**`writePlan(planFile, plan)`** — atomic: writes to `.tmp` then renames.
+**`writePlan(planFile, plan)`** — atomic write via `.tmp` + rename.
 
-**`buildPlanOutput({ planItems, lookupLog, duplicates, skipLog, ignoreFile })`** — assembles the final JSON structure.
+### `src/core/user-mappings.mjs`
 
-**`writeGlossary(glossaryPath, ...)`** — writes `REORGANIZATION_GLOSSARY.md` to the library root.
+**`loadUserMappings()`** — reads `user-mappings.json` from project root, returns `{}` on missing file. Scanner uses `userMappings.knownMisplaced[dirName]` in pass 2 to handle top-level folders named after books rather than authors.
+
+`user-mappings.json` shape: `{ "knownMisplaced": { "Folder Name": { author, series, title, confidence, note } } }`
 
 ### `src/core/executor.mjs`
 
-**`runExecute(planFile, executeLog, root, options)`**
-
-Execute filter — processes pending, approved, and optionally failed items:
-```javascript
-const toProcess = plan.items.filter(i =>
-  i.status === 'pending' || i.status === 'approved' ||
-  (retryFailed && i.status === 'failed'));
-```
-
-Writes `writePlan` after every item for restartability.
+Processes `pending`, `approved`, and optionally `failed` items. Writes `writePlan` after every item. Synthesized `DUP*` and `GD*` items are processed as follows:
+- `action: 'delete'` (`junk: true`) — deleted only when `--delete-junk` is passed
+- `action: 'move'` (`junk: false`) — moved to `dest` automatically without any extra flag
 
 ### `src/gui-server.mjs`
 
-Express 5 API server. Important: uses `app.get('/{*splat}', ...)` for the SPA fallback — Express 5 / path-to-regexp v8 requires named wildcards, not bare `*`.
+Express 5. SPA fallback uses `/{*splat}` (named wildcard — Express 5 / path-to-regexp v8 requirement).
 
-**Process runner state (module-level singleton):**
-```javascript
-let currentRun = null; // { process, type, output: string[] }
-const sseClients = new Set();
-```
+Key endpoints: `PATCH /api/settings` (updates `plan.settings`; currently only `duplicatesFolder`), `PATCH /api/duplicates/:index` (synthesizes `DUP${idx}`), `PATCH /api/group-duplicates/:index` (synthesizes `GD${idx}_*`), `DELETE /api/*/resolution` (removes synthesized items + clears resolution), `/api/fs/ls` (scoped to ROOT).
 
-SSE endpoint `/api/run/stream` replays buffered output for new connections (catch-up). Events: `start`, `output`, `done`, `status`.
+Duplicate resolution synthesis: if `plan.settings.duplicatesFolder` is set, the synthesized item uses `action: 'move'` with `dest = path.join(duplicatesFolder, path.relative(ROOT, discardFile))` and `junk: false`. Otherwise `action: 'delete'`, `dest: null`, `junk: true`.
 
-**Allowed PATCH fields for items:** `status` (pending/approved/skipped only), `dest`, `bestGuess`, `fallbackDest`. `done` and `failed` are read-only; the GUI cannot set them.
-
-**Duplicate resolution (`PATCH /api/duplicates/:index`):**
-1. Adds `resolution: { keep, deleteFile, resolvedAt }` to the duplicate record.
-2. Synthesizes a DELETE item with id `DUP${index}` in `plan.items`.
-
-**`/api/fs/ls?path=...`** — directory listing for the path picker. Scoped to ROOT (derived from `plan.ignoreFile` parent directory); returns 403 for paths outside it.
+Allowed PATCH fields for items: `status` (pending/approved/skipped only), `dest`, `bestGuess`, `fallbackDest`. `done` and `failed` are read-only.
 
 ---
 
 ## GUI Architecture (`gui/`)
 
-Vite 6 + React 19 + Tailwind CSS v4. Separate package with its own `node_modules`. Built output goes to `../gui-dist/` (project root level) which the Express server serves statically.
+Vite 6 + React 19 + Tailwind CSS v4. Separate package with its own `node_modules`. Built output → `../gui-dist/`. Dev proxy: `/api` → `http://localhost:7000`.
 
-**Tailwind v4 setup:** `gui/src/index.css` contains only `@import "tailwindcss"`. No `tailwind.config.js` needed.
+**`DuplicateCard.jsx`** — side-by-side comparison; falls back to `/api/duplicate-meta/:index` for plans missing `f1Meta`/`f2Meta`. Accepts `duplicatesFolder` prop; shows "Will move to…" vs "Will delete:" in the resolved state and updates button tooltips accordingly.
 
-**Dev proxy:** `vite.config.js` proxies `/api` → `http://localhost:7000`. Open `http://localhost:5173` for hot-reload dev.
+**`GroupDuplicateCard.jsx`** — combined file vs. chapters comparison. Expandable file list for the chapter side. Resolution adds items via `PATCH /api/group-duplicates/:index`. Accepts `duplicatesFolder` prop for the same move/delete labelling.
 
-**`gui/src/hooks/usePlan.js`** — React Query v5 hooks. All mutations invalidate `['plan']` on success so the UI stays fresh. `useDupMeta(index, enabled)` is lazy — only fetches when `enabled=true` (user clicks Load Metadata).
+**`PlanSection.jsx`** — groups items by first 2 path segments relative to ROOT. Per-group and global Approve All / Skip All.
 
-**`gui/src/components/ItemRow.jsx`** — `PathDisplay` component uses `direction: rtl` on the directory portion so long paths truncate from the left, keeping the filename always visible. Row click toggles an expanded detail panel showing full absolute source and destination paths.
-
-**`gui/src/components/PlanSection.jsx`** — Groups items by first 2 path segments relative to ROOT. Each group has per-group Approve All / Skip All. Section header has global Approve All / Skip All.
-
-**`gui/src/components/DuplicateCard.jsx`** — Side-by-side metadata comparison. Better value per row is highlighted; recommended column gets a ★. Falls back to `/api/duplicate-meta/:index` for old plan.json files missing `f1Meta`/`f2Meta`.
-
-**`gui/src/components/RunControls.jsx`** — SSE subscription via `EventSource('/api/run/stream')`. Terminal log auto-scrolls. Execute flags panel (5 flags). Active flag count shown as badge on Options button.
-
----
-
-## Special Case Handlers
-
-### Lee Child / Jack Reacher
-- `isDoubleNested(bookPath)` (in `src/core/fs-utils.mjs`): true when the only real subdir has the same name as the parent and there's no audio at the top level.
-- Double-nested: moves inner dir to `Lee Child/Jack Reacher/NN - Title/`; outer shell becomes empty and is cleaned by `--delete-empty-shells`.
-- `parseLeeChildFolder(name)`: regex for `Lee.Child.-.Jack.Reacher.NN.-.Title` pattern.
-
-### Marion Chesney (Agatha Raisin + Hamish Macbeth)
-- `parseAgathaRaisinFolder`: matches `Agatha Raisin NN - Title`.
-- `parseMCBeatonFolder`: matches `M C Beaton - AR##/HM## Title [XofY]` — extracts series code, book number, title, disc number.
-- Partial disc folders (XofY pattern) → `bestGuess` items pointing to `Series/NN - Title/Disc N/`.
-- `extractDiscInfo(name)`: extracts any `XofY` pattern.
-
-### Root-Level MP3s + Unknown Top-Level Book Dirs
-Both use the same resolution pipeline:
-1. Read ID3 tags via `music-metadata`: `common.artist`/`common.albumartist` = author, `common.album` = title.
-2. No author → `searchOpenLibrary(title)` hits OpenLibrary API.
-3. Single unambiguous result → move to `Author/Title/`.
-4. Multiple different authors → `bestGuess` item → `_NeedsReview/` without `--auto-accept-review`.
-
-### Parent→Child EINVAL Case
-When `classifyUnknownTopLevelBook` identifies a dir as a single-book folder and the found author matches the dir name (e.g., dir `Aasif Mandvi/` with ID3 artist="Aasif Mandvi", album="Sakina's Restaurant"), the plan item becomes `MOVE_DIR` with dest inside src. The `safeMove` parent→child shuffle in `src/core/fs-utils.mjs` handles this.
+**`RunControls.jsx`** — SSE via `EventSource('/api/run/stream')`; replays buffered output for new connections. Options panel includes a "Duplicates folder" text input that saves to `plan.settings` via `PATCH /api/settings`; blank = delete mode.
 
 ---
 
 ## Execute Log Format
 
-Appended to `execute.log` per run:
 ```
-========================================================================
 === EXECUTE RUN: <ISO timestamp> ===
 Flags: --execute [flags...]
-Items: N pending[, M retrying]
-========================================================================
 DONE   renamed  Author → Author/Book Title
-DONE   deleted  path/to/._foo.mp3
 SKIP   exists   path/to/already-there
 FAIL   move     path/to/item: error message
 --- SUMMARY: N done, N skipped, N failed ---
@@ -250,33 +200,8 @@ FAIL   move     path/to/item: error message
 
 ---
 
-## Known Hardcoded Author Mappings (`KNOWN_MISPLACED`)
+## Unraid-Specific Notes
 
-`KNOWN_MISPLACED` in `src/core/constants.mjs` handles top-level folders that are book/series titles rather than author names:
-- `A Column of Fire` → Ken Follett / Kingsbridge
-- `Dark Eden-A Novel` → Chris Beckett
-- `The Golden Compass` → Philip Pullman / His Dark Materials
-- `Information Doesnt Want to Be Free Audiobook` → Cory Doctorow
-- `Hank the Cowdog books 01-05` → John R. Erickson / Hank the Cowdog
-- `Michael.Watkins.-.The.First.90.Days` → Michael Watkins
-
-Add entries here for any other misplaced top-level folders discovered in the library.
-
----
-
-## Adding Support for a New Author's Naming Convention
-
-1. Write a `parseXxxFolder(name)` function as a closure inside `runDryScan` in `src/core/scanner.mjs` that returns structured data or null.
-2. Add a condition in `processBookDir` (or `processAuthorDir`) to call it.
-3. Use `addMove` for confident placements, `addBestGuess` when uncertain.
-4. Call `scanBookForJunk` on the source path to catch junk files inside it.
-5. Call `addLookup` to log the resolution in the glossary.
-
----
-
-## Unraid-Specific Notes (where this was originally built)
-
-- Library at `/mnt/user/Audiobooks` on Unraid 7.2.2 running as root.
-- `/mnt/user/` is shfs (union filesystem over multiple physical disks). Files in the same share can be on different physical disks, so `rename()` may return EXDEV — handled in `safeMove`.
-- Never use `/mnt/disk*/` paths directly — always go through `/mnt/user/` to stay on the union layer.
-- `music-metadata` v11 is ESM-only, which is why all files use `.mjs` with `import` syntax.
+- Library at `/mnt/user/Audiobooks` on Unraid shfs (union filesystem). Files in the same share may be on different physical disks → `rename()` can return EXDEV, handled in `safeMove`.
+- Never use `/mnt/disk*/` paths — always go through `/mnt/user/`.
+- `music-metadata` v11 is ESM-only → all files use `.mjs`.

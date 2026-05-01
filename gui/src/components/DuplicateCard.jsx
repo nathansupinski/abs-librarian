@@ -71,7 +71,7 @@ function MetaTable({ f1Meta, f2Meta, recommendation }) {
   );
 }
 
-export default function DuplicateCard({ dup, index, root }) {
+export default function DuplicateCard({ dup, index, root, duplicatesFolder }) {
   const [loadMeta, setLoadMeta] = useState(false);
   const resolve = useResolveDuplicate();
   const undo    = useUndoDuplicate();
@@ -150,13 +150,15 @@ export default function DuplicateCard({ dup, index, root }) {
             <button className="btn btn-success"
               style={{ flex: 1 }}
               onClick={() => keep('f1')}
-              disabled={resolve.isPending}>
+              disabled={resolve.isPending}
+              title={duplicatesFolder ? `Keep File 1 — File 2 will be moved to ${duplicatesFolder}` : 'Keep File 1 — File 2 will be deleted (requires --delete-junk)'}>
               {recommendation === 'f1' && '★ '}Keep File 1
             </button>
             <button className="btn btn-success"
               style={{ flex: 1 }}
               onClick={() => keep('f2')}
-              disabled={resolve.isPending}>
+              disabled={resolve.isPending}
+              title={duplicatesFolder ? `Keep File 2 — File 1 will be moved to ${duplicatesFolder}` : 'Keep File 2 — File 1 will be deleted (requires --delete-junk)'}>
               {recommendation === 'f2' && '★ '}Keep File 2
             </button>
             <button className="btn btn-ghost" onClick={() => {}}>
@@ -166,7 +168,11 @@ export default function DuplicateCard({ dup, index, root }) {
         ) : (
           <>
             <span style={{ flex: 1, color: 'var(--color-muted)', fontSize: 12 }}>
-              Will delete: <code style={{ fontSize: 11 }}>{shorten(dup.resolution.deleteFile)}</code>
+              {duplicatesFolder ? (
+                <>Will move to <code style={{ fontSize: 11 }}>{duplicatesFolder}</code>: <code style={{ fontSize: 11 }}>{shorten(dup.resolution.deleteFile)}</code></>
+              ) : (
+                <>Will delete: <code style={{ fontSize: 11 }}>{shorten(dup.resolution.deleteFile)}</code></>
+              )}
             </span>
             <button className="btn btn-ghost"
               onClick={() => undo.mutate(index)}

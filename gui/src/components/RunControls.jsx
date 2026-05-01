@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Square, Terminal, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
+import { usePlan, useUpdateSettings } from '../hooks/usePlan.js';
 
 const FLAG_DEFS = [
   { key: 'autoAcceptReview',     label: '--auto-accept-review',     desc: 'Move best-guesses to their suggested dest instead of _NeedsReview/' },
@@ -12,6 +13,8 @@ const FLAG_DEFS = [
 
 export default function RunControls() {
   const qc = useQueryClient();
+  const { data: plan } = usePlan();
+  const updateSettings = useUpdateSettings();
   const [running, setRunning]         = useState(false);
   const [runType, setRunType]         = useState(null);
   const [exitCode, setExitCode]       = useState(null);
@@ -25,8 +28,13 @@ export default function RunControls() {
     retryFailed: false,
     forceDeleteAudioJunk: false,
   });
+  const [dupFolderInput, setDupFolderInput] = useState('');
   const logRef  = useRef(null);
   const outputRef = useRef('');
+
+  useEffect(() => {
+    setDupFolderInput(plan?.settings?.duplicatesFolder ?? '');
+  }, [plan?.settings?.duplicatesFolder]);
 
   useEffect(() => {
     const es = new EventSource('/api/run/stream');
@@ -76,6 +84,9 @@ export default function RunControls() {
 
   const toggleFlag = (key) =>
     setFlags(prev => ({ ...prev, [key]: !prev[key] }));
+
+  const saveDupFolder = () =>
+    updateSettings.mutate({ duplicatesFolder: dupFolderInput.trim() || null });
 
   const activeFlags = FLAG_DEFS.filter(f => flags[f.key]).map(f => f.label);
 
@@ -169,24 +180,56 @@ export default function RunControls() {
         <div style={{
           padding: '8px 16px 12px',
           borderTop: '1px solid var(--color-border)',
-          display: 'flex', flexWrap: 'wrap', gap: '8px 20px',
         }}>
-          {FLAG_DEFS.map(({ key, label, desc }) => (
-            <label key={key}
-              style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
-              title={desc}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 20px', marginBottom: 12 }}>
+            {FLAG_DEFS.map(({ key, label, desc }) => (
+              <label key={key}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}
+                title={desc}
+              >
+                <input
+                  type="checkbox"
+                  checked={flags[key]}
+                  onChange={() => toggleFlag(key)}
+                  style={{ accentColor: 'var(--color-accent)', cursor: 'pointer' }}
+                />
+                <code style={{ fontSize: 11, color: flags[key] ? 'var(--color-text)' : 'var(--color-muted)' }}>
+                  {label}
+                </code>
+              </label>
+            ))}
+          </div>
+          <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+              Duplicates folder:
+            </span>
+            <input
+              type="text"
+              value={dupFolderInput}
+              onChange={e => setDupFolderInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && saveDupFolder()}
+              placeholder="(leave blank to delete duplicates)"
+              style={{
+                flex: 1, minWidth: 260,
+                background: 'var(--color-surface)', border: '1px solid var(--color-border)',
+                borderRadius: 4, padding: '3px 8px', fontSize: 12,
+                color: 'var(--color-text)', fontFamily: 'monospace',
+              }}
+            />
+            <button
+              className="btn btn-ghost"
+              onClick={saveDupFolder}
+              disabled={updateSettings.isPending}
+              style={{ fontSize: 11, padding: '3px 10px' }}
             >
-              <input
-                type="checkbox"
-                checked={flags[key]}
-                onChange={() => toggleFlag(key)}
-                style={{ accentColor: 'var(--color-accent)', cursor: 'pointer' }}
-              />
-              <code style={{ fontSize: 11, color: flags[key] ? 'var(--color-text)' : 'var(--color-muted)' }}>
-                {label}
-              </code>
-            </label>
-          ))}
+              {updateSettings.isPending ? 'Saving…' : 'Save'}
+            </button>
+            {plan?.settings?.duplicatesFolder && (
+              <span style={{ fontSize: 11, color: 'var(--color-success)' }}>
+                ✓ Resolved duplicates will be moved, not deleted
+              </span>
+            )}
+          </div>
         </div>
       )}
 

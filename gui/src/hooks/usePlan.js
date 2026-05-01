@@ -50,6 +50,32 @@ async function undoDuplicate(index) {
   return res.json();
 }
 
+async function resolveGroupDuplicate({ index, keep }) {
+  const res = await fetch(`/api/group-duplicates/${index}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keep }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function undoGroupDuplicate(index) {
+  const res = await fetch(`/api/group-duplicates/${index}/resolution`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function updateSettings(settings) {
+  const res = await fetch('/api/settings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export function usePlan() {
   return useQuery({ queryKey: PLAN_KEY, queryFn: fetchPlan });
 }
@@ -62,10 +88,13 @@ function useMutationWithRefresh(mutFn) {
   });
 }
 
-export function useUpdateItem()       { return useMutationWithRefresh(patchItem); }
-export function useBatchUpdate()      { return useMutationWithRefresh(batchPatch); }
-export function useResolveDuplicate() { return useMutationWithRefresh(resolveDuplicate); }
-export function useUndoDuplicate()    { return useMutationWithRefresh(undoDuplicate); }
+export function useUpdateItem()              { return useMutationWithRefresh(patchItem); }
+export function useBatchUpdate()             { return useMutationWithRefresh(batchPatch); }
+export function useResolveDuplicate()        { return useMutationWithRefresh(resolveDuplicate); }
+export function useUndoDuplicate()           { return useMutationWithRefresh(undoDuplicate); }
+export function useResolveGroupDuplicate()   { return useMutationWithRefresh(resolveGroupDuplicate); }
+export function useUndoGroupDuplicate()      { return useMutationWithRefresh(undoGroupDuplicate); }
+export function useUpdateSettings()          { return useMutationWithRefresh(updateSettings); }
 
 // Fetch duplicate metadata on demand (for old plan.json files lacking f1Meta/f2Meta)
 export function useDupMeta(index, enabled) {

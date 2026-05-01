@@ -4,6 +4,7 @@ import { usePlan } from './hooks/usePlan.js';
 import PlanStats from './components/PlanStats.jsx';
 import PlanSection from './components/PlanSection.jsx';
 import DuplicateCard from './components/DuplicateCard.jsx';
+import GroupDuplicateCard from './components/GroupDuplicateCard.jsx';
 import BatchToolbar from './components/BatchToolbar.jsx';
 import RunControls from './components/RunControls.jsx';
 
@@ -69,9 +70,11 @@ export default function App() {
 
   if (!plan) return null;
 
-  const root       = inferRoot(plan);
-  const items      = plan.items || [];
-  const duplicates = plan.duplicates || [];
+  const root              = inferRoot(plan);
+  const duplicatesFolder  = plan.settings?.duplicatesFolder || null;
+  const items             = plan.items || [];
+  const duplicates        = plan.duplicates || [];
+  const groupDuplicates   = plan.groupDuplicates || [];
 
   const bestGuess     = items.filter(i => i.bestGuess);
   const confirmed     = items.filter(i => !i.bestGuess && !i.junk);
@@ -117,6 +120,22 @@ export default function App() {
           />
         )}
 
+        {groupDuplicates.length > 0 && (
+          <section className="surface" style={{ marginBottom: 16, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--color-border)', fontWeight: 600, fontSize: 14 }}>
+              Group Duplicates
+              <span style={{ color: 'var(--color-muted)', fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+                (combined file vs. chapter files — {groupDuplicates.length})
+              </span>
+            </div>
+            <div style={{ padding: 16 }}>
+              {groupDuplicates.map((gd, i) => (
+                <GroupDuplicateCard key={i} gdup={gd} index={i} root={root} duplicatesFolder={duplicatesFolder} />
+              ))}
+            </div>
+          </section>
+        )}
+
         {duplicates.length > 0 && (
           <section className="surface" style={{ marginBottom: 16, overflow: 'hidden' }}>
             <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--color-border)', fontWeight: 600, fontSize: 14 }}>
@@ -127,13 +146,13 @@ export default function App() {
             </div>
             <div style={{ padding: 16 }}>
               {duplicates.map((dup, i) => (
-                <DuplicateCard key={i} dup={dup} index={i} root={root} />
+                <DuplicateCard key={i} dup={dup} index={i} root={root} duplicatesFolder={duplicatesFolder} />
               ))}
             </div>
           </section>
         )}
 
-        {items.length === 0 && duplicates.length === 0 && (
+        {items.length === 0 && duplicates.length === 0 && groupDuplicates.length === 0 && (
           <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--color-muted)' }}>
             <div style={{ fontSize: 16 }}>No items in plan</div>
             <div style={{ fontSize: 13, marginTop: 8 }}>Run the dry-run scan first: <code>node reorganize.mjs --root /path</code></div>

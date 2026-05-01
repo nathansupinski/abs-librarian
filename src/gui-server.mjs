@@ -139,6 +139,21 @@ export function startServer(argv) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  app.patch('/api/settings', (req, res) => {
+    try {
+      const plan = readPlan(PLAN_FILE);
+      const allowed = new Set(['duplicatesFolder']);
+      plan.settings = plan.settings || {};
+      for (const [k, v] of Object.entries(req.body)) {
+        if (!allowed.has(k)) continue;
+        if (v === null || v === '') delete plan.settings[k];
+        else plan.settings[k] = v;
+      }
+      writePlan(PLAN_FILE, plan);
+      res.json({ ok: true, settings: plan.settings });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   app.patch('/api/duplicates/:index', (req, res) => {
     try {
       const plan = readPlan(PLAN_FILE);
@@ -149,25 +164,34 @@ export function startServer(argv) {
       const { keep } = req.body;
       if (keep !== 'f1' && keep !== 'f2') return res.status(400).json({ error: 'keep must be "f1" or "f2"' });
 
-      const deleteFile = keep === 'f1' ? dup.f2 : dup.f1;
-      const timestamp  = new Date().toISOString();
+      const discardFile = keep === 'f1' ? dup.f2 : dup.f1;
+      const timestamp   = new Date().toISOString();
+      const duplicatesFolder = plan.settings?.duplicatesFolder;
 
-      dup.resolution = { keep, deleteFile, resolvedAt: timestamp };
+      let action, dest;
+      if (duplicatesFolder && ROOT) {
+        action = 'move';
+        dest = path.join(duplicatesFolder, path.relative(ROOT, discardFile));
+      } else {
+        action = 'delete';
+        dest = null;
+      }
+
+      dup.resolution = { keep, deleteFile: discardFile, resolvedAt: timestamp };
 
       // Remove any existing DUP item for this index
       plan.items = plan.items.filter(i => i.id !== `DUP${idx}`);
 
-      // Synthesize a DELETE plan item for the discarded file
       plan.items.push({
         id: `DUP${idx}`,
         type: 'MOVE_FILE',
-        source: deleteFile,
-        dest: null,
+        source: discardFile,
+        dest,
         reason: `duplicate resolution — keeping ${keep} file`,
         notes: `Resolved via GUI on ${timestamp}`,
         status: 'pending',
-        junk: true,
-        action: 'delete',
+        junk: action === 'delete',
+        action,
         bestGuess: false,
       });
 
@@ -185,6 +209,70 @@ export function startServer(argv) {
 
       delete dup.resolution;
       plan.items = plan.items.filter(i => i.id !== `DUP${idx}`);
+      writePlan(PLAN_FILE, plan);
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.patch('/api/group-duplicates/:index', (req, res) => {
+    try {
+      const plan = readPlan(PLAN_FILE);
+      const idx = parseInt(req.params.index, 10);
+      const gd = (plan.groupDuplicates || [])[idx];
+      if (!gd) return res.status(404).json({ error: 'Group duplicate not found' });
+
+      const { keep } = req.body;
+      if (keep !== 'groupA' && keep !== 'groupB') {
+        return res.status(400).json({ error: 'keep must be "groupA" or "groupB"' });
+      }
+
+      const timestamp = new Date().toISOString();
+      gd.resolution = { keep, resolvedAt: timestamp };
+      const duplicatesFolder = plan.settings?.duplicatesFolder;
+
+      // Remove any previously synthesized items for this group duplicate
+      plan.items = plan.items.filter(i => !i.id?.startsWith(`GD${idx}_`));
+
+      const discard = keep === 'groupA' ? gd.groupB : gd.groupA;
+      const keepLabel = keep === 'groupA' ? gd.groupALabel : gd.groupBLabel;
+
+      discard.files.forEach((filePath, fi) => {
+        let action, dest;
+        if (duplicatesFolder && ROOT) {
+          action = 'move';
+          dest = path.join(duplicatesFolder, path.relative(ROOT, filePath));
+        } else {
+          action = 'delete';
+          dest = null;
+        }
+        plan.items.push({
+          id: `GD${idx}_${fi}`,
+          type: 'MOVE_FILE',
+          source: filePath,
+          dest,
+          reason: `group duplicate resolution — keeping ${keepLabel}`,
+          notes: `Resolved via GUI on ${timestamp}`,
+          status: 'pending',
+          junk: action === 'delete',
+          action,
+          bestGuess: false,
+        });
+      });
+
+      writePlan(PLAN_FILE, plan);
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.delete('/api/group-duplicates/:index/resolution', (req, res) => {
+    try {
+      const plan = readPlan(PLAN_FILE);
+      const idx = parseInt(req.params.index, 10);
+      const gd = (plan.groupDuplicates || [])[idx];
+      if (!gd) return res.status(404).json({ error: 'Group duplicate not found' });
+
+      delete gd.resolution;
+      plan.items = plan.items.filter(i => !i.id?.startsWith(`GD${idx}_`));
       writePlan(PLAN_FILE, plan);
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }

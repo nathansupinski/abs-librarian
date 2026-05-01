@@ -17,6 +17,7 @@ export async function runCLI(argv) {
     .option('--force-delete-audio-junk', 'Bypass audio-extension safety check for junk items')
     .option('--retry-failed', 'Retry items that failed in a previous execute run')
     .option('--ignore-file <path>', 'Gitignore-style file; matched paths are preserved')
+    .option('--duplicates-folder <path>', 'Move resolved duplicates here instead of deleting them')
     .allowUnknownOption(false);
 
   program.parse(argv);
@@ -38,6 +39,7 @@ export async function runCLI(argv) {
       retryFailed:          !!opts.retryFailed,
     });
   } else {
-    await runDryScan(root, { planFile, glossaryPath: glossary, ignoreFile });
+    const duplicatesFolder = opts.duplicatesFolder ? path.resolve(opts.duplicatesFolder) : undefined;
+    await runDryScan(root, { planFile, glossaryPath: glossary, ignoreFile, duplicatesFolder });
   }
 }

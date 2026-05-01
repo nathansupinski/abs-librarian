@@ -1,5 +1,5 @@
 import path from 'path';
-import { HARD_SKIP, NON_AUDIOBOOK_DIRS, KNOWN_MISPLACED } from './constants.mjs';
+import { HARD_SKIP, NON_AUDIOBOOK_DIRS } from './constants.mjs';
 import {
   listDir, statOf, isAudio, isSystemFile, isJunkFile,
   hasAudioRecursive, isDoubleNested,
@@ -7,57 +7,44 @@ import {
 import { loadIgnoreFile, matchedIgnoreRule } from './ignore.mjs';
 import { readTags, recommendDuplicate, searchOpenLibrary } from './metadata.mjs';
 import { createPlanState, buildPlanOutput, writePlan, writeGlossary } from './plan.mjs';
-
-// ============================================================
-// NAME PARSERS
-// ============================================================
-
-function parseLeeChildFolder(name) {
-  const m1 = name.match(/^Lee\.Child\.-\.Jack\.Reacher\.(\d{2})\.-\.(.+)$/i);
-  if (m1) return { num: m1[1], title: m1[2].replace(/\./g, ' ').trim() };
-  const m2 = name.match(/^Lee\.Child\.-Jack\.Reacher\.(\d{2})\.-\.(.+)$/i);
-  if (m2) return { num: m2[1], title: m2[2].replace(/\./g, ' ').trim() };
-  return null;
-}
-
-function parseAgathRaisinFolder(name) {
-  const m = name.match(/^Agatha Raisin\s+(\d{1,2})\s+-\s+(.+)$/i);
-  return m ? { num: m[1].padStart(2, '0'), title: m[2].trim() } : null;
-}
-
-function parseMCBeatonFolder(name) {
-  const cleaned = name.replace(/^Hamish flood\s+/i, '');
-  const ar = cleaned.match(/^M[. ]C[. ]\s*Beaton\s+-\s+AR(\d{2})\s+(.+?)(?:\s+(\d+)of(\d+))?$/i);
-  if (ar) return { series: 'Agatha Raisin', num: ar[1].padStart(2, '0'), title: ar[2].trim(),
-    disc: ar[3] ? +ar[3] : null, totalDiscs: ar[4] ? +ar[4] : null };
-  const hm = cleaned.match(/^M[. ]C[. ]\s*Beaton\s+-\s+HM(\d{2})\s+(.+?)(?:\s+(\d+)of(\d+))?$/i);
-  if (hm) return { series: 'Hamish Macbeth', num: hm[1].padStart(2, '0'), title: hm[2].trim(),
-    disc: hm[3] ? +hm[3] : null, totalDiscs: hm[4] ? +hm[4] : null };
-  return null;
-}
-
-function extractDiscInfo(name) {
-  const m = name.match(/(\d+)of(\d+)/i);
-  return m ? { disc: +m[1], totalDiscs: +m[2] } : null;
-}
+import { loadUserMappings } from './user-mappings.mjs';
+import { loadRules } from '../rules/loader.mjs';
 
 // ============================================================
 // SCAN IMPLEMENTATION
 // ============================================================
 
-export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ignoreFilePath } = {}) {
+export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ignoreFilePath, duplicatesFolder } = {}) {
   console.log('=== DRY-RUN: Scanning audiobooks directory ===\n');
 
   const ignoreRules = loadIgnoreFile(ignoreFilePath);
   if (ignoreRules.length > 0)
     console.log(`Loaded ${ignoreRules.length} ignore rules from ${ignoreFilePath}\n`);
 
+  const userMappings = loadUserMappings();
+  const knownMisplaced = userMappings.knownMisplaced || {};
+
+  const rules = await loadRules();
+  if (rules.length > 0)
+    console.log(`Loaded ${rules.length} scan rule(s): ${rules.map(r => r.name).join(', ')}\n`);
+
   const state = createPlanState();
-  const { planItems, lookupLog, duplicates, skipLog } = state;
-  const { addMove, addJunkMove, addJunkDelete, addBestGuess, addSkip, addDuplicate, addLookup } = state;
+  const { planItems, lookupLog, duplicates, groupDuplicates, skipLog } = state;
+  const { addMove, addJunkMove, addJunkDelete, addBestGuess, addSkip, addDuplicate, addGroupDuplicate, addLookup } = state;
 
   const relPath = p => path.relative(root, p);
   const checkIgnore = (p, isDir) => matchedIgnoreRule(relPath(p), isDir, ignoreRules);
+
+  // ctx is built here — function declarations below (scanBookForJunk etc.) are hoisted
+  const ctx = {
+    addMove, addJunkMove, addJunkDelete, addBestGuess,
+    addSkip, addDuplicate, addGroupDuplicate, addLookup,
+    root, relPath, checkIgnore,
+    listDir, statOf, isAudio, isSystemFile, isJunkFile,
+    hasAudioRecursive, isDoubleNested,
+    readTags, recommendDuplicate, searchOpenLibrary,
+    scanBookForJunk,
+  };
 
   // ---- Pass 1: root-level files --------------------------------------
   console.log('[Pass 1] Root-level files...');
@@ -94,7 +81,7 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
       addMove(p, path.join(root, '_non-audiobook', e), 'non-audiobook content');
       continue;
     }
-    if (KNOWN_MISPLACED[e]) { await classifyMisplacedBookFolder(p, e, KNOWN_MISPLACED[e]); continue; }
+    if (knownMisplaced[e]) { await classifyMisplacedBookFolder(p, e, knownMisplaced[e]); continue; }
 
     const audioAtRoot = listDir(p).filter(isAudio);
     const subDirs = listDir(p).filter(n => statOf(path.join(p, n))?.isDirectory() && !n.startsWith('.'));
@@ -110,11 +97,12 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
   scanForEmptyDirs(root, 0);
 
   // ---- Write outputs -------------------------------------------------
-  const plan = buildPlanOutput({ planItems, lookupLog, duplicates, skipLog, ignoreFile: ignoreFilePath });
+  const settings = duplicatesFolder ? { duplicatesFolder } : {};
+  const plan = buildPlanOutput({ planItems, lookupLog, duplicates, groupDuplicates, skipLog, ignoreFile: ignoreFilePath, settings });
   writePlan(planFile, plan);
   console.log(`Plan    → ${planFile}`);
 
-  writeGlossary(glossaryPath, { planItems, lookupLog, duplicates, skipLog, root, ignoreFile: ignoreFilePath, ignoreRules });
+  writeGlossary(glossaryPath, { planItems, lookupLog, duplicates, groupDuplicates, skipLog, root, ignoreFile: ignoreFilePath, ignoreRules });
 
   const confirmed = planItems.filter(i => !i.bestGuess && !i.junk);
   const bestGuess = planItems.filter(i => i.bestGuess);
@@ -127,10 +115,9 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
   console.log(`  Junk DELETE      : ${junkDel.length}  (system files + empty dirs)`);
   console.log(`  Junk MOVE→_misc_ : ${junkMove.length}  (download artifacts)`);
   console.log(`  Duplicates       : ${duplicates.length}`);
+  console.log(`  Group duplicates : ${groupDuplicates.length}  (combined vs. chapters)`);
   console.log(`  Skipped          : ${skipLog.length}  (ignore rules + hard-protected)`);
   console.log('\nReview REORGANIZATION_GLOSSARY.md, then run with --execute.');
-
-  // ---- Classifier helpers (closures over state + root) ---------------
 
   async function classifyRootMp3(filePath, filename) {
     const name = path.basename(filename, path.extname(filename));
@@ -221,6 +208,9 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
   }
 
   async function processAuthorDir(authorPath, authorName) {
+    for (const rule of rules) {
+      if (await rule.onAuthorDir(authorPath, authorName, ctx)) return;
+    }
     console.log(`  ${authorName}`);
     for (const e of listDir(authorPath).sort()) {
       const p = path.join(authorPath, e);
@@ -280,8 +270,9 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
   }
 
   async function processBookDir(bookPath, bookName, authorName, authorPath) {
-    if (authorName === 'Lee Child')      { await processLeeChildBook(bookPath, bookName); return; }
-    if (authorName === 'Marion Chesney') { await processMarionChesneyBook(bookPath, bookName, authorPath); return; }
+    for (const rule of rules) {
+      if (await rule.onBookDir(bookPath, bookName, authorName, authorPath, ctx)) return;
+    }
 
     if (!hasAudioRecursive(bookPath)) return;
 
@@ -297,88 +288,6 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     scanBookForJunk(bookPath, bookName, authorName, true);
   }
 
-  async function processLeeChildBook(bookPath, bookName) {
-    if (!hasAudioRecursive(bookPath)) return;
-
-    const parsed = parseLeeChildFolder(bookName);
-    if (parsed) {
-      const { num, title } = parsed;
-      const dest = path.join(root, 'Lee Child', 'Jack Reacher', `${num} - ${title}`);
-      if (isDoubleNested(bookPath)) {
-        const inner = path.join(bookPath, bookName);
-        addMove(inner, dest, `Lee Child double-nested → Jack Reacher/${num} - ${title}/`,
-          `Outer shell "${bookName}" will be empty — use --delete-empty-shells`);
-        scanBookForJunk(inner, bookName, 'Lee Child', true);
-      } else {
-        addMove(bookPath, dest, `Lee Child → Jack Reacher/${num} - ${title}/`);
-        scanBookForJunk(bookPath, bookName, 'Lee Child', true);
-      }
-      addLookup({ filename: bookName, method: 'filename-parse',
-        result: `Lee Child / Jack Reacher / ${num} - ${title}`, confidence: 'high',
-        notes: 'Parsed from Lee.Child.-.Jack.Reacher.NN.-.Title pattern' });
-      return;
-    }
-
-    const clean = bookName.replace(/\./g, ' ').trim();
-    const bestDest = path.join(root, 'Lee Child', 'Jack Reacher', clean);
-    addBestGuess(bookPath, bestDest, path.join(root, '_NeedsReview', bookName),
-      'Lee Child folder — naming pattern not recognized',
-      `Guessed: Jack Reacher / "${clean}"`);
-    addLookup({ filename: bookName, method: 'unmatched-pattern',
-      result: `Lee Child / Jack Reacher / ${clean}`, confidence: 'low', ambiguous: true,
-      notes: 'Does not match Lee.Child.-.Jack.Reacher.NN.-.Title' });
-  }
-
-  async function processMarionChesneyBook(bookPath, bookName, authorPath) {
-    if (!hasAudioRecursive(bookPath)) return;
-
-    const ar = parseAgathRaisinFolder(bookName);
-    if (ar) {
-      addMove(bookPath, path.join(authorPath, 'Agatha Raisin', `${ar.num} - ${ar.title}`),
-        `Marion Chesney → Agatha Raisin/${ar.num} - ${ar.title}/`);
-      addLookup({ filename: bookName, method: 'filename-parse',
-        result: `Marion Chesney / Agatha Raisin / ${ar.num} - ${ar.title}`, confidence: 'high', notes: '' });
-      scanBookForJunk(bookPath, bookName, 'Marion Chesney', true);
-      return;
-    }
-
-    const mcb = parseMCBeatonFolder(bookName);
-    if (mcb) {
-      const bookDest = path.join(authorPath, mcb.series, `${mcb.num} - ${mcb.title}`);
-      if (mcb.disc !== null) {
-        const discDest = path.join(bookDest, `Disc ${mcb.disc}`);
-        const note = `Disc ${mcb.disc}${mcb.totalDiscs ? ' of ' + mcb.totalDiscs : ''} for "${mcb.title}". Book may be incomplete.`;
-        addBestGuess(bookPath, discDest, path.join(root, '_NeedsReview', bookName),
-          `Marion Chesney partial disc → ${mcb.series}/${mcb.num} - ${mcb.title}/Disc ${mcb.disc}/`, note);
-        addLookup({ filename: bookName, method: 'filename-parse',
-          result: `Marion Chesney / ${mcb.series} / ${mcb.num} - ${mcb.title} / Disc ${mcb.disc}`,
-          confidence: 'high', notes: note });
-      } else {
-        addMove(bookPath, bookDest, `Marion Chesney → ${mcb.series}/${mcb.num} - ${mcb.title}/`);
-        addLookup({ filename: bookName, method: 'filename-parse',
-          result: `Marion Chesney / ${mcb.series} / ${mcb.num} - ${mcb.title}`, confidence: 'high', notes: '' });
-        scanBookForJunk(bookPath, bookName, 'Marion Chesney', true);
-      }
-      return;
-    }
-
-    const discInfo = extractDiscInfo(bookName);
-    if (discInfo) {
-      const af = listDir(bookPath).find(isAudio);
-      let guessTitle = bookName;
-      if (af) { const tags = await readTags(path.join(bookPath, af)); if (tags.album) guessTitle = tags.album; }
-      addBestGuess(bookPath, path.join(authorPath, guessTitle, `Disc ${discInfo.disc}`),
-        path.join(root, '_NeedsReview', bookName),
-        'Marion Chesney disc folder — partially parsed',
-        `Disc ${discInfo.disc} of ${discInfo.totalDiscs}. Guessed title: "${guessTitle}".`);
-      addLookup({ filename: bookName, method: 'id3+filename',
-        result: `Marion Chesney / ${guessTitle} / Disc ${discInfo.disc}`,
-        confidence: 'low', ambiguous: true, notes: 'Series code not recognized; using ID3 album tag' });
-      return;
-    }
-
-    scanBookForJunk(bookPath, bookName, 'Marion Chesney', true);
-  }
 
   function scanBookForJunk(bookPath, bookName, authorName, recursive) {
     for (const e of listDir(bookPath)) {
