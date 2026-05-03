@@ -10,6 +10,10 @@ import { ScanRule } from './BaseRule.mjs';
  *   - At least one file is ≥8× the median file size (combined file)
  *   - At least 2 files are below that threshold (chapter files)
  *   - The large file's basename resembles the folder name
+ *   - Combined size of large file(s) is ≥40% of chapter size — guards against
+ *     just-a-longer-than-average chapter being mis-flagged as a combined file.
+ *     A true combined file holds the same audio as the chapters, so the totals
+ *     should be in the same ballpark even with bitrate differences.
  *
  * The folder is flagged as a group duplicate. The user must resolve it in the
  * GUI (choose combined vs. chapters); the folder is left in place until then.
@@ -52,6 +56,13 @@ export default class CombinedChaptersDuplicateRule extends ScanRule {
 
     const totalLargeSize = large.reduce((s, f) => s + f.size, 0);
     const totalSmallSize = small.reduce((s, f) => s + f.size, 0);
+
+    // A real combined file holds the same audio as the chapters, so the byte
+    // totals should be comparable. If the "large" file is a tiny fraction of
+    // the chapter total, it's just an above-median chapter, not a combined
+    // file. 0.4 leaves headroom for bitrate differences (e.g. 64kbps combined
+    // vs 128kbps chapters ≈ 0.5 ratio).
+    if (totalLargeSize / totalSmallSize < 0.4) return false;
 
     ctx.addGroupDuplicate(
       {

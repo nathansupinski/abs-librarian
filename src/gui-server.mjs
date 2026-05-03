@@ -7,8 +7,10 @@ import express from 'express';
 import { readPlan, writePlan } from './core/plan.mjs';
 import { readTags, recommendDuplicate } from './core/metadata.mjs';
 import { statOf, listDir } from './core/fs-utils.mjs';
+import { resolver as metadataResolver } from './providers/index.mjs';
+import { cleanBookTitle } from './core/title-utils.mjs';
 
-const ALLOWED_PATCH_FIELDS = new Set(['status', 'dest', 'bestGuess', 'fallbackDest']);
+const ALLOWED_PATCH_FIELDS = new Set(['status', 'dest', 'bestGuess', 'fallbackDest', 'series']);
 const ALLOWED_STATUSES     = new Set(['pending', 'approved', 'skipped']);
 
 function openBrowser(url) {
@@ -53,6 +55,7 @@ export function startServer(argv) {
     .name('gui')
     .option('--port <number>', 'Port to listen on', '7000')
     .option('--no-open', 'Do not open browser automatically')
+    .option('--root <path>', 'Audiobooks root directory (used when no plan.json exists yet)')
     .allowUnknownOption(false);
   program.parse(argv);
   const opts = program.opts();
@@ -62,17 +65,20 @@ export function startServer(argv) {
   const PLAN_FILE  = path.join(scriptDir, '..', 'plan.json');
   const DIST_DIR   = path.join(scriptDir, '..', 'gui-dist');
 
-  if (!statOf(PLAN_FILE)) {
-    console.error(`Error: plan.json not found at ${PLAN_FILE}`);
-    console.error('Run: node reorganize.mjs --root /path/to/Audiobooks');
-    process.exit(1);
+  // Determine ROOT: prefer plan file, fall back to --root option.
+  // Server starts successfully even when neither is available.
+  function getRoot() {
+    if (statOf(PLAN_FILE)) {
+      try {
+        const p = readPlan(PLAN_FILE);
+        if (p.ignoreFile) return path.dirname(p.ignoreFile);
+        if (p.root)       return p.root;
+      } catch { /* fall through */ }
+    }
+    return opts.root ? path.resolve(opts.root) : null;
   }
 
-  // Determine ROOT from the plan file
-  const initialPlan = readPlan(PLAN_FILE);
-  const ROOT = initialPlan.ignoreFile
-    ? path.dirname(initialPlan.ignoreFile)
-    : null;
+  const ROOT = getRoot();
 
   const app = express();
   app.use(express.json());
@@ -80,6 +86,9 @@ export function startServer(argv) {
   // ---- API routes -------------------------------------------------------
 
   app.get('/api/plan', (_req, res) => {
+    if (!statOf(PLAN_FILE)) {
+      return res.json({ noPlan: true, root: getRoot() });
+    }
     try { res.json(readPlan(PLAN_FILE)); }
     catch (e) { res.status(500).json({ error: e.message }); }
   });
@@ -103,24 +112,56 @@ export function startServer(argv) {
 
   app.patch('/api/items', (req, res) => {
     try {
-      const { ids, patch } = req.body;
-      if (!Array.isArray(ids) || !patch) return res.status(400).json({ error: 'ids and patch required' });
-
       const plan = readPlan(PLAN_FILE);
-      const idSet = new Set(ids);
       let updated = 0;
 
-      for (const item of plan.items) {
-        if (!idSet.has(item.id)) continue;
-        for (const [k, v] of Object.entries(patch)) {
-          if (!ALLOWED_PATCH_FIELDS.has(k)) continue;
-          if (k === 'status' && !ALLOWED_STATUSES.has(v)) continue;
-          item[k] = v;
+      if (Array.isArray(req.body.items)) {
+        // Per-item patch format: { items: [{id, patch}, ...] }
+        const itemMap = new Map(plan.items.map(i => [i.id, i]));
+        for (const { id, patch } of req.body.items) {
+          const item = itemMap.get(id);
+          if (!item) continue;
+          for (const [k, v] of Object.entries(patch)) {
+            if (!ALLOWED_PATCH_FIELDS.has(k)) continue;
+            if (k === 'status' && !ALLOWED_STATUSES.has(v)) continue;
+            item[k] = v;
+          }
+          updated++;
         }
-        updated++;
+      } else {
+        // Same-patch format: { ids, patch }
+        const { ids, patch } = req.body;
+        if (!Array.isArray(ids) || !patch) return res.status(400).json({ error: 'ids and patch required' });
+        const idSet = new Set(ids);
+        for (const item of plan.items) {
+          if (!idSet.has(item.id)) continue;
+          for (const [k, v] of Object.entries(patch)) {
+            if (!ALLOWED_PATCH_FIELDS.has(k)) continue;
+            if (k === 'status' && !ALLOWED_STATUSES.has(v)) continue;
+            item[k] = v;
+          }
+          updated++;
+        }
       }
+
       writePlan(PLAN_FILE, plan);
       res.json({ ok: true, updated });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get('/api/series/suggest', async (req, res) => {
+    try {
+      const { title, author } = req.query;
+      if (!title) return res.status(400).json({ error: 'title required' });
+      const result = await metadataResolver.resolve({ title: cleanBookTitle(title), author: author || null });
+      if (!result || !result.series?.length) return res.json(null);
+      res.json({
+        series: result.series,
+        provider: result.provider,
+        confidence: result.confidence,
+        bookTitle: result.title,
+        author: result.author,
+      });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -161,8 +202,19 @@ export function startServer(argv) {
       const dup = plan.duplicates?.[idx];
       if (!dup) return res.status(404).json({ error: 'Duplicate not found' });
 
+      // Dismiss path: user marked this as not actually a duplicate. Clear any
+      // prior resolution + synthesized item, set the dismissal flag, return.
+      if (req.body?.dismiss) {
+        delete dup.resolution;
+        dup.dismissed = true;
+        plan.items = plan.items.filter(i => i.id !== `DUP${idx}`);
+        writePlan(PLAN_FILE, plan);
+        return res.json({ ok: true });
+      }
+
       const { keep } = req.body;
       if (keep !== 'f1' && keep !== 'f2') return res.status(400).json({ error: 'keep must be "f1" or "f2"' });
+      delete dup.dismissed;
 
       const discardFile = keep === 'f1' ? dup.f2 : dup.f1;
       const timestamp   = new Date().toISOString();
@@ -208,6 +260,7 @@ export function startServer(argv) {
       if (!dup) return res.status(404).json({ error: 'Duplicate not found' });
 
       delete dup.resolution;
+      delete dup.dismissed;
       plan.items = plan.items.filter(i => i.id !== `DUP${idx}`);
       writePlan(PLAN_FILE, plan);
       res.json({ ok: true });
@@ -221,10 +274,19 @@ export function startServer(argv) {
       const gd = (plan.groupDuplicates || [])[idx];
       if (!gd) return res.status(404).json({ error: 'Group duplicate not found' });
 
+      if (req.body?.dismiss) {
+        delete gd.resolution;
+        gd.dismissed = true;
+        plan.items = plan.items.filter(i => !i.id?.startsWith(`GD${idx}_`));
+        writePlan(PLAN_FILE, plan);
+        return res.json({ ok: true });
+      }
+
       const { keep } = req.body;
       if (keep !== 'groupA' && keep !== 'groupB') {
         return res.status(400).json({ error: 'keep must be "groupA" or "groupB"' });
       }
+      delete gd.dismissed;
 
       const timestamp = new Date().toISOString();
       gd.resolution = { keep, resolvedAt: timestamp };
@@ -272,9 +334,32 @@ export function startServer(argv) {
       if (!gd) return res.status(404).json({ error: 'Group duplicate not found' });
 
       delete gd.resolution;
+      delete gd.dismissed;
       plan.items = plan.items.filter(i => !i.id?.startsWith(`GD${idx}_`));
       writePlan(PLAN_FILE, plan);
       res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Sample first file in each group; chapter files share encoding so one read
+  // is representative without paying the I/O cost of every file in the group.
+  app.get('/api/group-duplicate-meta/:index', async (req, res) => {
+    try {
+      const plan = readPlan(PLAN_FILE);
+      const idx = parseInt(req.params.index, 10);
+      const gd = (plan.groupDuplicates || [])[idx];
+      if (!gd) return res.status(404).json({ error: 'Group duplicate not found' });
+
+      async function sampleGroup(group) {
+        const sampleFile = group?.files?.[0];
+        if (!sampleFile) return null;
+        const tags = await readTags(sampleFile, true);
+        return { bitrate: tags.bitrate, codec: tags.codec, duration: tags.duration };
+      }
+      const [groupAMeta, groupBMeta] = await Promise.all([
+        sampleGroup(gd.groupA), sampleGroup(gd.groupB),
+      ]);
+      res.json({ groupAMeta, groupBMeta });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
@@ -334,11 +419,17 @@ export function startServer(argv) {
   app.post('/api/run/dry-run', (req, res) => {
     if (currentRun) return res.status(409).json({ error: 'A run is already in progress' });
     try {
-      const plan = readPlan(PLAN_FILE);
-      const root = plan.ignoreFile ? path.dirname(plan.ignoreFile) : ROOT;
-      if (!root) return res.status(400).json({ error: 'Cannot determine ROOT from plan.json' });
+      // root priority: existing plan file → request body → server --root flag
+      let root = getRoot();
+      if (req.body?.root) root = path.resolve(req.body.root);
+      if (!root) return res.status(400).json({ error: 'No root directory configured. Pass { root } in the request body or restart the server with --root.' });
       const args = ['--root', root];
-      if (plan.ignoreFile) args.push('--ignore-file', plan.ignoreFile);
+      if (statOf(PLAN_FILE)) {
+        try {
+          const plan = readPlan(PLAN_FILE);
+          if (plan.ignoreFile) args.push('--ignore-file', plan.ignoreFile);
+        } catch { /* best-effort */ }
+      }
       spawnRun('dry-run', REORG_SCRIPT, args);
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -348,7 +439,7 @@ export function startServer(argv) {
     if (currentRun) return res.status(409).json({ error: 'A run is already in progress' });
     try {
       const plan = readPlan(PLAN_FILE);
-      const root = plan.ignoreFile ? path.dirname(plan.ignoreFile) : ROOT;
+      const root = plan.ignoreFile ? path.dirname(plan.ignoreFile) : getRoot();
       if (!root) return res.status(400).json({ error: 'Cannot determine ROOT from plan.json' });
       const { flags = {} } = req.body || {};
       const args = ['--root', root, '--execute'];
@@ -383,6 +474,15 @@ export function startServer(argv) {
        </body></html>`
     ));
   }
+
+  // ---- Watch plan.json for external changes (CLI dry-runs) ---------------
+
+  let planWatchDebounce = null;
+  fs.watch(path.dirname(PLAN_FILE), (eventType, filename) => {
+    if (filename !== path.basename(PLAN_FILE)) return;
+    clearTimeout(planWatchDebounce);
+    planWatchDebounce = setTimeout(() => broadcast({ event: 'plan-updated' }), 300);
+  });
 
   // ---- Start server -----------------------------------------------------
 

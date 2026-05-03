@@ -30,7 +30,7 @@ const ignoreFile = opts.ignoreFile ?? path.join(root, '.audiobooksignore');
 
 `runDryScan` loads rules from `src/rules/` at startup, then runs three passes:
 
-1. **Pass 1 — Root files**: classifies each file at the library root. Audio → ID3 tags + OpenLibrary fallback. Junk/system → DELETE.
+1. **Pass 1 — Root files**: classifies each file at the library root. Audio → ID3 tags + metadata provider cascade fallback. Junk/system → DELETE.
 2. **Pass 2 — Top-level dirs**: hard-skip → ignore rules → `user-mappings.json` check → audio-at-root check → `processAuthorDir`.
 3. **Pass 3 — Empty dirs**: `scanForEmptyDirs` walks the full tree, marks dirs with no audio → DELETE.
 
@@ -48,6 +48,21 @@ All classifier functions are closures inside `runDryScan` sharing `planState` fr
   junk: bool, action: 'move' | 'delete', bestGuess: bool,
   fallbackDest,     // _NeedsReview/ path when bestGuess && !AUTO_ACCEPT_REVIEW
   bestGuessNote, error,
+  providerMatch,    // optional — set when a metadata provider confirmed the move
+}
+```
+
+`providerMatch` shape (present only when a provider was used):
+```javascript
+{
+  provider: string,       // e.g. 'Audible', 'OpenLibrary', 'GoogleBooks'
+  title: string,
+  author: string | null,
+  series: [{ series: string, sequence: string | null }],
+  narrator: string | null,
+  publishedYear: string | null,
+  asin: string | null,
+  confidence: number,     // 0–1
 }
 ```
 
@@ -68,6 +83,8 @@ All classifier functions are closures inside `runDryScan` sharing `planState` fr
 ```
 
 Resolving a pairwise duplicate synthesizes a `DUP${index}` plan item. Resolving a group duplicate synthesizes `GD${index}_${fileIndex}` items for all files in the discarded group. Whether each item is a DELETE (`junk: true, action: 'delete', dest: null`) or a MOVE (`junk: false, action: 'move', dest: <duplicatesFolder>/...`) depends on `plan.settings.duplicatesFolder` at resolution time.
+
+A duplicate can also be **dismissed** as a false positive (`dup.dismissed = true` / `gd.dismissed = true`). Dismissal clears any prior resolution + synthesized items and produces no plan items — both files stay in place. The `DELETE /api/{duplicates,group-duplicates}/:index/resolution` endpoint clears both `resolution` and `dismissed`.
 
 ### HARD_SKIP
 
@@ -96,7 +113,7 @@ export class ScanRule {
 
 ### RuleContext
 
-Passed to every hook. Contains: `addMove`, `addJunkMove`, `addJunkDelete`, `addBestGuess`, `addSkip`, `addDuplicate`, `addGroupDuplicate`, `addLookup` (plan mutators); `root`, `relPath`, `checkIgnore`; `listDir`, `statOf`, `isAudio`, `isSystemFile`, `isJunkFile`, `hasAudioRecursive`, `isDoubleNested`; `readTags`, `recommendDuplicate`, `searchOpenLibrary`; `scanBookForJunk`.
+Passed to every hook. Contains: `addMove`, `addJunkMove`, `addJunkDelete`, `addBestGuess`, `addSkip`, `addDuplicate`, `addGroupDuplicate`, `addLookup` (plan mutators); `root`, `relPath`, `checkIgnore`; `listDir`, `statOf`, `isAudio`, `isSystemFile`, `isJunkFile`, `hasAudioRecursive`, `isDoubleNested`; `readTags`, `recommendDuplicate`, `searchOpenLibrary` (legacy); `resolveMetadata({ title, author, duration })` → `ResolverResult | null`; `scanBookForJunk`.
 
 ### Built-in Rules (priority order)
 
@@ -105,7 +122,28 @@ Passed to every hook. Contains: `addMove`, `addJunkMove`, `addJunkDelete`, `addB
 | `dot-separated-format.mjs` | 10 | `A.B.-.Series.NN.-.Title` — any author using dot-separated naming |
 | `series-code-format.mjs` | 20 | `M C Beaton - AR##/HM## Title [NofM]` + `Agatha Raisin NN - Title` |
 | `combined-chapters-duplicate.mjs` | 25 | One large combined file + many chapter files in same folder |
+| `series-detection.mjs` | 27 | Embedded series in folder names + author-level provider lookup |
 | `mismatched-files-in-folder.mjs` | 30 | Audio files whose ID3 album tags don't match the container folder |
+
+#### `series-detection.mjs` — author-scoped strategies
+
+In `onAuthorDir` it processes all books in the author directory in four passes,
+sharing a per-author `knownSeries` set across passes:
+
+1. **Embedded** — folder names matching `Title [-_:] Series, Book N` are
+   grouped; one provider call canonicalises the series name per group.
+2. **Numbered prefix** — 2+ siblings sharing `Series N - Title` (with a
+   stop-list of generic prefixes like `Book`/`Vol`/`Part`).
+3. **Provider lookup** — every still-unmatched book gets a single
+   `resolveMetadata` call. The picker prefers series with a sequence over
+   meta-series (so e.g. Stormlight Archive #1 beats The Cosmere #?), and
+   prefers entries already in `knownSeries` for this author.
+4. **Substring fallback** — for books still unmatched, if the folder name
+   contains a series name from `knownSeries`, claim it (low confidence,
+   no sequence). Catches specials/audio dramas providers don't index.
+
+Results are cached on the rule instance and surfaced in `onBookDir`. Set
+`ABS_DEBUG_SERIES=1` (or `--debug-rules`) to log per-decision output.
 
 ### Adding a New Rule
 
@@ -143,6 +181,8 @@ Exports: `HARD_SKIP`, `NON_AUDIOBOOK_DIRS`, `AUDIO_EXTS`, `JUNK_EXTS`, `SYSTEM_N
 
 **`createPlanState()`** — returns isolated mutable state + helpers. Returns: `{ planItems, lookupLog, duplicates, groupDuplicates, skipLog, addMove, addJunkMove, addJunkDelete, addBestGuess, addSkip, addDuplicate, addGroupDuplicate, addLookup }`.
 
+**`addMove(source, dest, reason, notes = '', opts = {})`** / **`addBestGuess(source, bestDest, fallbackDest, reason, bestGuessNote, opts = {})`** — `opts` is spread into the plan item, used to attach `{ providerMatch }` when a metadata provider confirmed the decision.
+
 **`addGroupDuplicate(groupA, groupB, note, opts)`** — each group: `{ files, totalSize, description }`. Resolution synthesized by `gui-server.mjs`.
 
 **`buildPlanOutput({ ..., settings })`** — includes `settings` (e.g. `{ duplicatesFolder }`) in the written plan. Scanner passes it through from CLI options or leaves it `{}`.
@@ -154,6 +194,26 @@ Exports: `HARD_SKIP`, `NON_AUDIOBOOK_DIRS`, `AUDIO_EXTS`, `JUNK_EXTS`, `SYSTEM_N
 **`loadUserMappings()`** — reads `user-mappings.json` from project root, returns `{}` on missing file. Scanner uses `userMappings.knownMisplaced[dirName]` in pass 2 to handle top-level folders named after books rather than authors.
 
 `user-mappings.json` shape: `{ "knownMisplaced": { "Folder Name": { author, series, title, confidence, note } } }`
+
+### `src/providers/`
+
+Metadata provider system. Auto-instantiated singleton (`resolver`) exported from `src/providers/index.mjs`.
+
+**`BaseProvider`** — abstract base class. Subclasses implement `async search({ title, author, isbn, asin, duration })` → `ProviderResult[]`. Never throws; returns `[]` on failure. `ProviderResult` shape: `{ title, author, subtitle, narrator, publisher, publishedYear, description, isbn, asin, genres, language, duration (secs), series: [{ series, sequence }] }`.
+
+**`AudibleProvider`** — `api.audible.com/1.0/catalog/products`. Flat response: `authors[].name`, `narrators[].name`, `series[].title/.sequence`, `runtime_length_min * 60 → duration`. No auth required.
+
+**`OpenLibraryProvider`** — `openlibrary.org/search.json`. Refactors the legacy `searchOpenLibrary()` function. Returns `series: []`, `duration: null`.
+
+**`GoogleBooksProvider`** — `googleapis.com/books/v1/volumes`. Free, no auth (1000 req/day unauthenticated). Returns `series: []`, `duration: null`.
+
+**`AudnexusProvider`** — `audnexus.apis.mx/books`. Rate-limited to 100 req/min via module-level token bucket (no npm deps). Used as enrichment only (after ASIN is known from another provider), not in the primary cascade.
+
+**`MetadataResolver`** — orchestrates the provider cascade. Default stack: Audible → OpenLibrary → GoogleBooks; stops at first result with confidence ≥ 0.6. Enriches with Audnexus when ASIN is available. Confidence formula (mirrors ABS BookFinder): `duration_ratio × 0.7 + title_sim × 0.2 + author_sim × 0.1`; when duration unavailable, normalizes title+author weights to 0–1. In-memory LRU cache (500 entries, 1h TTL, per process). Levenshtein fuzzy matching rejects results with normalized edit distance > 0.4.
+
+`resolver.resolve({ title, author, duration })` → `ResolverResult | null`. `ResolverResult`: `{ provider, title, author, series, narrator, publishedYear, asin, confidence }`.
+
+Scanner calls it via `metadataResolver.resolve()`; rules call it via `ctx.resolveMetadata()`.
 
 ### `src/core/executor.mjs`
 

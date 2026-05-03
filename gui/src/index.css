@@ -95,10 +95,22 @@
     letter-spacing: 0.04em;
   }
 
-  .badge-dir   { background: #1e3a5f; color: #60a5fa; }
-  .badge-file  { background: #1a2e1f; color: #4ade80; }
-  .badge-guess { background: #3b2a14; color: #fb923c; }
-  .badge-junk  { background: #2d1f1f; color: #f87171; }
+  .badge-dir      { background: #1e3a5f; color: #60a5fa; }
+  .badge-file     { background: #1a2e1f; color: #4ade80; }
+  .badge-guess    { background: #3b2a14; color: #fb923c; }
+  .badge-junk     { background: #2d1f1f; color: #f87171; }
+  .badge-provider {
+    display: inline-flex; align-items: center; gap: 3px;
+    background: #1a2535; color: #7dd3fc;
+    border: 1px solid #1e4d6b;
+  }
+  .badge-series {
+    display: inline-flex; align-items: center; gap: 3px;
+    background: #2a1f40; color: #c084fc;
+    border: 1px solid #4c2a7a;
+    cursor: pointer; text-transform: none; letter-spacing: 0;
+  }
+  .badge-series:hover { opacity: 0.8; }
 
   .status-approved { color: var(--color-success); }
   .status-skipped  { color: var(--color-skip); }

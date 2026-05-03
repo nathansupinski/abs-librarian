@@ -70,6 +70,15 @@ export default function App() {
 
   if (!plan) return null;
 
+  // No plan.json yet — show the run controls so the user can kick off a dry-run
+  if (plan.noPlan) {
+    return (
+      <div style={{ minHeight: '100vh' }}>
+        <RunControls noPlan initialRoot={plan.root ?? ''} />
+      </div>
+    );
+  }
+
   const root              = inferRoot(plan);
   const duplicatesFolder  = plan.settings?.duplicatesFolder || null;
   const items             = plan.items || [];
@@ -83,7 +92,7 @@ export default function App() {
   return (
     <div style={{ minHeight: '100vh' }}>
       <PlanStats plan={plan} />
-      <RunControls />
+      <RunControls initialRoot={root} />
 
       <main style={{ maxWidth: 1600, margin: '0 auto', padding: '20px 24px 80px' }}>
 
@@ -92,6 +101,7 @@ export default function App() {
             title="Best Guesses"
             items={bestGuess}
             root={root}
+            allItems={items}
             selection={selection}
             onSelect={handleSelect}
             defaultOpen={true}
@@ -103,6 +113,7 @@ export default function App() {
             title="Confirmed Moves"
             items={confirmed}
             root={root}
+            allItems={items}
             selection={selection}
             onSelect={handleSelect}
             defaultOpen={bestGuess.length === 0}
@@ -114,6 +125,7 @@ export default function App() {
             title="Junk Items"
             items={junk}
             root={root}
+            allItems={items}
             selection={selection}
             onSelect={handleSelect}
             defaultOpen={false}

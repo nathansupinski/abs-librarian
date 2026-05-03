@@ -25,9 +25,9 @@ export function createPlanState() {
     planItems.push({ id: `${obj.type[0]}${planItems.length}`, status: 'pending', ...obj });
   }
 
-  function addMove(source, dest, reason, notes = '') {
+  function addMove(source, dest, reason, notes = '', opts = {}) {
     const type = statOf(source)?.isDirectory() ? 'MOVE_DIR' : 'MOVE_FILE';
-    _addItem({ type, source, dest, reason, notes, junk: false, action: 'move', bestGuess: false });
+    _addItem({ type, source, dest, reason, notes, junk: false, action: 'move', bestGuess: false, ...opts });
   }
 
   function addJunkMove(source, dest, reason) {
@@ -39,10 +39,10 @@ export function createPlanState() {
     _addItem({ type, source, dest: null, reason, junk: true, action: 'delete', bestGuess: false });
   }
 
-  function addBestGuess(source, bestDest, fallbackDest, reason, bestGuessNote) {
+  function addBestGuess(source, bestDest, fallbackDest, reason, bestGuessNote, opts = {}) {
     const type = statOf(source)?.isDirectory() ? 'MOVE_DIR' : 'MOVE_FILE';
     _addItem({ type, source, dest: bestDest, fallbackDest, reason, bestGuessNote,
-      junk: false, action: 'move', bestGuess: true });
+      junk: false, action: 'move', bestGuess: true, ...opts });
   }
 
   function addSkip(source, reason) { skipLog.push({ source, reason }); }

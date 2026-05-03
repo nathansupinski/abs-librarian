@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CheckCircle, MinusCircle, ChevronRight, ChevronDown, Edit2 } from 'lucide-react';
+import { CheckCircle, MinusCircle, ChevronRight, ChevronDown, Edit2, BookOpen } from 'lucide-react';
 import { useUpdateItem } from '../hooks/usePlan.js';
 import BestGuessModal from './BestGuessModal.jsx';
 
@@ -8,6 +8,31 @@ function Badge({ item }) {
   if (item.junk)      return <span className="badge badge-junk">JUNK</span>;
   if (item.type === 'MOVE_DIR')  return <span className="badge badge-dir">DIR</span>;
   return <span className="badge badge-file">FILE</span>;
+}
+
+function ProviderBadge({ providerMatch }) {
+  if (!providerMatch) return null;
+  const pct = Math.round((providerMatch.confidence ?? 0) * 100);
+  const detail = `${providerMatch.title || ''}${providerMatch.author ? ` by ${providerMatch.author}` : ''}`;
+  return (
+    <span
+      className="badge badge-provider"
+      title={`${providerMatch.provider}: ${detail} (${pct}%)`}
+    >
+      <BookOpen size={9} style={{ flexShrink: 0 }} />
+      {providerMatch.provider}
+    </span>
+  );
+}
+
+function SeriesBadge({ series }) {
+  if (!series) return null;
+  const label = series.sequence ? `${series.name} #${series.sequence}` : series.name;
+  return (
+    <span className="badge badge-series" title={`Series: ${label}`}>
+      {label}
+    </span>
+  );
 }
 
 function StatusIcon({ status }) {
@@ -96,6 +121,8 @@ export default function ItemRow({ item, root, selected, onSelect, allVisibleIds 
 
         <StatusIcon status={item.status} />
         <Badge item={item} />
+        <ProviderBadge providerMatch={item.providerMatch} />
+        <SeriesBadge series={item.series} />
 
         {/* Expand toggle */}
         <div style={{ flexShrink: 0, color: 'var(--color-border)', width: 14 }}>
@@ -172,6 +199,19 @@ export default function ItemRow({ item, root, selected, onSelect, allVisibleIds 
           {item.fallbackDest && <FullPathRow label="FALLBACK" path={item.fallbackDest} dim />}
           {item.notes && (
             <div style={{ color: 'var(--color-muted)', fontSize: 11, marginTop: 2 }}>{item.notes}</div>
+          )}
+          {item.providerMatch && (
+            <div style={{ color: 'var(--color-muted)', fontSize: 11, marginTop: 2 }}>
+              <span style={{ color: '#7dd3fc' }}>{item.providerMatch.provider}</span>
+              {': '}
+              <strong style={{ color: 'var(--color-text)' }}>"{item.providerMatch.title}"</strong>
+              {item.providerMatch.author && ` by ${item.providerMatch.author}`}
+              {item.providerMatch.series?.length > 0 && (
+                ` — ${item.providerMatch.series[0].series}` +
+                (item.providerMatch.series[0].sequence ? ` #${item.providerMatch.series[0].sequence}` : '')
+              )}
+              {` (${Math.round((item.providerMatch.confidence ?? 0) * 100)}% confidence)`}
+            </div>
           )}
         </div>
       )}

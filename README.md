@@ -100,6 +100,8 @@ Starts both the API server (nodemon, port 7000) and Vite dev server (port 5173) 
 | `--retry-failed` | Retry items that failed in a previous execute run |
 | `--ignore-file <path>` | Custom ignore file (default: `<root>/.audiobooksignore`) |
 | `--duplicates-folder <path>` | Move resolved duplicates to this folder instead of deleting them (stored in plan.json; also configurable in the GUI) |
+| `--scope <substr>` | Limit dry-run scan to top-level dirs whose name contains this substring (debug aid) |
+| `--debug-rules` | Verbose rule decisions on stdout (equivalent to `ABS_DEBUG_SERIES=1`) |
 
 **Recommended (full cleanup):**
 
@@ -218,11 +220,30 @@ The scanner uses a modular rules engine. Rules live in `src/rules/` — any `.mj
 - **Series-code naming** (`series-code-format.mjs`) — M.C. Beaton `AR##`/`HM##` series codes and `Agatha Raisin NN - Title` patterns; partial disc folders (`XofY`) become `Disc N` subfolders
 - **Combined + chapters** (`combined-chapters-duplicate.mjs`) — detects folders containing both a single large combined audiobook and many individual chapter files; presents a group duplicate for user resolution
 - **Mismatched files** (`mismatched-files-in-folder.mjs`) — detects audio files whose ID3 album tag doesn't match their container folder name; moves each file to the correct `Author/Album/` location
-- **Root-level MP3s** — ID3 tags first; falls back to OpenLibrary API; ambiguous → `_NeedsReview/`
+- **Root-level MP3s** — ID3 tags first; falls back to the metadata provider cascade; ambiguous → `_NeedsReview/`
 - **Loose audio in author folders** — wrapped in a per-book subfolder using the ID3 album tag as the title
-- **Top-level book folders** — remapped via `user-mappings.json` + ID3 verification, or detected automatically via ID3 + OpenLibrary
+- **Top-level book folders** — remapped via `user-mappings.json` + ID3 verification, or detected automatically via ID3 + metadata providers
 
 **Adding a new rule:** create `src/rules/my-rule.mjs` with a class extending `ScanRule` from `./BaseRule.mjs`, override `onBookDir` and/or `onAuthorDir`, return `true` when handled. No other changes needed.
+
+---
+
+## Metadata Providers
+
+When ID3 tags don't supply enough context (missing author, ambiguous results), the scanner queries external book databases to identify and confirm metadata. Providers are tried in priority order; the first result with sufficient confidence wins.
+
+| Provider | Priority | Notes |
+|---|---|---|
+| **Audible** | 1st | Best audiobook coverage; returns duration, narrator, series. Used for confidence scoring. |
+| **OpenLibrary** | 2nd | Broad book database; free, no auth |
+| **Google Books** | 3rd | Fallback; good description and genre data |
+| **Audnexus** | Enrichment | Called only when a prior provider returns an ASIN; adds narrator and chapter data |
+
+**Confidence scoring** follows the same weighted formula as Audiobookshelf: duration match (0.7) + title similarity (0.2) + author similarity (0.1). When no duration is available, the title+author weights are normalized to fill the 0–1 range.
+
+When a provider confirms a move, the plan item gets a `providerMatch` field and the GUI shows a blue badge (e.g. **Audible**) next to the item type badge. Expanding the row shows the matched title, author, series, and confidence percentage.
+
+Rules can access the provider system via `ctx.resolveMetadata({ title, author, duration })`, which returns a `ResolverResult` or `null`.
 
 ---
 
@@ -259,7 +280,8 @@ The file ships with several example entries. If the file is missing, the scanner
 | `src/core/constants.mjs` | `HARD_SKIP`, extension sets (`AUDIO_EXTS`, `JUNK_EXTS`, `SYSTEM_NAMES`) |
 | `src/core/fs-utils.mjs` | `safeMove`, `deleteItem`, `copyTree`, `cleanEmptyShells`, `isAudio`, etc. |
 | `src/core/ignore.mjs` | `loadIgnoreFile`, `matchedIgnoreRule` |
-| `src/core/metadata.mjs` | `readTags`, `recommendDuplicate`, `searchOpenLibrary` |
+| `src/core/metadata.mjs` | `readTags`, `recommendDuplicate`, `searchOpenLibrary` (legacy) |
+| `src/providers/` | Metadata provider system — `BaseProvider`, four provider implementations, `MetadataResolver` |
 | `src/core/plan.mjs` | `createPlanState`, `writePlan` (atomic), `buildPlanOutput`, `writeGlossary` |
 | `src/core/scanner.mjs` | `runDryScan` — three-pass scan, rule runner, classifier helpers |
 | `src/core/executor.mjs` | `runExecute` — processes plan items, writes execute.log |

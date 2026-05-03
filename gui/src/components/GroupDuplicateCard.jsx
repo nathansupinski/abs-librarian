@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronUp } from 'lucide-react';
-import { useResolveGroupDuplicate, useUndoGroupDuplicate } from '../hooks/usePlan.js';
+import { ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
+import { useResolveGroupDuplicate, useUndoGroupDuplicate, useDismissGroupDuplicate, useGroupDupMeta } from '../hooks/usePlan.js';
 
 function formatSize(bytes) {
   if (!bytes) return '—';
@@ -9,8 +9,21 @@ function formatSize(bytes) {
   return (bytes / 1e3).toFixed(0) + ' KB';
 }
 
-function GroupColumn({ label, group, isKept, shorten, last }) {
+function formatDuration(secs) {
+  if (!secs) return null;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function GroupColumn({ label, group, meta, isKept, shorten, last }) {
   const [expanded, setExpanded] = useState(false);
+
+  // Sampled from the first file in the group; chapter files share encoding.
+  const metaParts = [];
+  if (meta?.bitrate) metaParts.push(`${meta.bitrate} kbps`);
+  if (meta?.codec)   metaParts.push(meta.codec);
+  if (meta?.duration && group.files.length === 1) metaParts.push(formatDuration(meta.duration));
 
   return (
     <div style={{
@@ -26,6 +39,12 @@ function GroupColumn({ label, group, isKept, shorten, last }) {
         <span style={{ fontSize: 13, fontWeight: 600 }}>{group.description}</span>
         <span style={{ fontSize: 11, color: 'var(--color-muted)' }}>{formatSize(group.totalSize)}</span>
       </div>
+      {metaParts.length > 0 && (
+        <div style={{ fontSize: 11, color: 'var(--color-muted)', marginBottom: 6, fontFamily: 'monospace' }}>
+          {metaParts.join(' · ')}
+          {group.files.length > 1 && <span style={{ marginLeft: 4, opacity: 0.7 }}>(sampled)</span>}
+        </div>
+      )}
 
       {group.files.length === 1 ? (
         <code className="path-text" title={group.files[0]} style={{ display: 'block', color: 'var(--color-text)', fontSize: 11 }}>
@@ -59,6 +78,9 @@ function GroupColumn({ label, group, isKept, shorten, last }) {
 export default function GroupDuplicateCard({ gdup, index, root, duplicatesFolder }) {
   const resolve = useResolveGroupDuplicate();
   const undo    = useUndoGroupDuplicate();
+  const dismiss = useDismissGroupDuplicate();
+  const [loadMeta, setLoadMeta] = useState(false);
+  const { data: meta, isFetching: metaLoading } = useGroupDupMeta(index, loadMeta);
 
   const shorten = p => root && p.startsWith(root + '/') ? p.slice(root.length + 1) : p;
   const keep = (which) => resolve.mutate({ index, keep: which });
@@ -78,6 +100,11 @@ export default function GroupDuplicateCard({ gdup, index, root, duplicatesFolder
             ✓ Keeping {keptLabel}
           </span>
         )}
+        {gdup.dismissed && !gdup.resolution && (
+          <span style={{ marginLeft: 'auto', color: 'var(--color-muted)', fontSize: 11 }}>
+            ✗ Marked as not a duplicate
+          </span>
+        )}
       </div>
 
       {/* Two-column comparison */}
@@ -85,21 +112,37 @@ export default function GroupDuplicateCard({ gdup, index, root, duplicatesFolder
         <GroupColumn
           label={gdup.groupALabel}
           group={gdup.groupA}
+          meta={meta?.groupAMeta}
           isKept={gdup.resolution?.keep === 'groupA'}
           shorten={shorten}
         />
         <GroupColumn
           label={gdup.groupBLabel}
           group={gdup.groupB}
+          meta={meta?.groupBMeta}
           isKept={gdup.resolution?.keep === 'groupB'}
           shorten={shorten}
           last
         />
       </div>
 
+      {/* Bitrate / codec loader (lazy, single read per group) */}
+      {!meta && (
+        <div style={{ padding: '6px 16px', borderTop: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {metaLoading ? (
+            <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+              <span style={{ color: 'var(--color-muted)', fontSize: 12 }}>Loading bitrate / codec…</span></>
+          ) : (
+            <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => setLoadMeta(true)}>
+              Load bitrate / codec
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Actions */}
       <div style={{ padding: '10px 16px', borderTop: '1px solid var(--color-border)', display: 'flex', gap: 8, alignItems: 'center' }}>
-        {!gdup.resolution ? (
+        {!gdup.resolution && !gdup.dismissed ? (
           <>
             <button className="btn btn-success" style={{ flex: 1 }}
               onClick={() => keep('groupA')} disabled={resolve.isPending}
@@ -111,6 +154,12 @@ export default function GroupDuplicateCard({ gdup, index, root, duplicatesFolder
               title={duplicatesFolder ? `Keep ${gdup.groupBLabel} — ${gdup.groupALabel} will be moved to ${duplicatesFolder}` : `Keep ${gdup.groupBLabel} — ${gdup.groupALabel} will be deleted (requires --delete-junk)`}>
               Keep {gdup.groupBLabel}
             </button>
+            <button className="btn btn-ghost"
+              onClick={() => dismiss.mutate(index)}
+              disabled={dismiss.isPending}
+              title="Mark as not a duplicate — all files stay in place and no action is taken">
+              Not a duplicate
+            </button>
             <button className="btn btn-ghost" onClick={() => {}}>
               Decide Later
             </button>
@@ -118,10 +167,16 @@ export default function GroupDuplicateCard({ gdup, index, root, duplicatesFolder
         ) : (
           <>
             <span style={{ flex: 1, color: 'var(--color-muted)', fontSize: 12 }}>
-              {duplicatesFolder ? 'Will move to ' : 'Will delete '}
-              {gdup.resolution.keep === 'groupA' ? gdup.groupBLabel : gdup.groupALabel}
-              {' '}({gdup.resolution.keep === 'groupA' ? gdup.groupB.files.length : gdup.groupA.files.length} file(s))
-              {duplicatesFolder && <> → <code style={{ fontSize: 11 }}>{duplicatesFolder}</code></>}
+              {gdup.dismissed ? (
+                <>All files kept in place.</>
+              ) : (
+                <>
+                  {duplicatesFolder ? 'Will move to ' : 'Will delete '}
+                  {gdup.resolution.keep === 'groupA' ? gdup.groupBLabel : gdup.groupALabel}
+                  {' '}({gdup.resolution.keep === 'groupA' ? gdup.groupB.files.length : gdup.groupA.files.length} file(s))
+                  {duplicatesFolder && <> → <code style={{ fontSize: 11 }}>{duplicatesFolder}</code></>}
+                </>
+              )}
             </span>
             <button className="btn btn-ghost"
               onClick={() => undo.mutate(index)} disabled={undo.isPending}>

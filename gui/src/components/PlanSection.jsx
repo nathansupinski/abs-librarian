@@ -1,7 +1,8 @@
 import React, { useState, useRef } from 'react';
-import { ChevronDown, ChevronRight, CheckCheck, MinusCircle } from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCheck, MinusCircle, Edit2 } from 'lucide-react';
 import { useBatchUpdate } from '../hooks/usePlan.js';
 import ItemRow from './ItemRow.jsx';
+import SeriesModal from './SeriesModal.jsx';
 
 // Extract the last 3 path segments relative to root, used as a group key
 function groupKey(source, root) {
@@ -24,10 +25,11 @@ function groupItems(items, root) {
   return [...groups.values()];
 }
 
-function GroupHeader({ label, items, onBatch, batchPending }) {
+function GroupHeader({ label, items, onBatch, batchPending, onSeriesEdit }) {
   const pendingIds = items.filter(i => i.status === 'pending').length;
   const approvedIds = items.filter(i => i.status === 'approved').length;
   const allIds = items.map(i => i.id);
+  const series = items.find(i => i.series)?.series ?? null;
 
   return (
     <div style={{
@@ -38,6 +40,26 @@ function GroupHeader({ label, items, onBatch, batchPending }) {
       <span style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--color-accent-hover)', flex: 1 }}>
         {label}
       </span>
+      {series ? (
+        <button
+          className="badge badge-series"
+          style={{ fontSize: 10 }}
+          onClick={() => onSeriesEdit(items)}
+          title="Edit series assignment"
+        >
+          {series.name}{series.sequence ? ` #${series.sequence}` : ''}
+          <Edit2 size={9} style={{ marginLeft: 2 }} />
+        </button>
+      ) : (
+        <button
+          className="btn btn-ghost"
+          style={{ fontSize: 10, padding: '1px 6px' }}
+          onClick={() => onSeriesEdit(items)}
+          title="Assign to a series"
+        >
+          <Edit2 size={9} /> Series
+        </button>
+      )}
       <span style={{ color: 'var(--color-muted)', fontSize: 11 }}>
         {items.length} items
         {pendingIds > 0 && ` · ${pendingIds} pending`}
@@ -57,8 +79,9 @@ function GroupHeader({ label, items, onBatch, batchPending }) {
   );
 }
 
-export default function PlanSection({ title, items, root, selection, onSelect, defaultOpen = true }) {
+export default function PlanSection({ title, items, root, allItems, selection, onSelect, defaultOpen = true }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [seriesModalItems, setSeriesModalItems] = useState(null);
   const batchUpdate = useBatchUpdate();
   const lastClickedRef = useRef(null);
 
@@ -120,14 +143,13 @@ export default function PlanSection({ title, items, root, selection, onSelect, d
         <div>
           {groups.map(group => (
             <div key={group.label}>
-              {groups.length > 1 && (
-                <GroupHeader
-                  label={group.label}
-                  items={group.items}
-                  onBatch={handleBatch}
-                  batchPending={batchUpdate.isPending}
-                />
-              )}
+              <GroupHeader
+                label={group.label}
+                items={group.items}
+                onBatch={handleBatch}
+                batchPending={batchUpdate.isPending}
+                onSeriesEdit={setSeriesModalItems}
+              />
               {group.items.map(item => (
                 <ItemRow
                   key={item.id}
@@ -143,6 +165,16 @@ export default function PlanSection({ title, items, root, selection, onSelect, d
             </div>
           ))}
         </div>
+      )}
+
+      {seriesModalItems && (
+        <SeriesModal
+          items={seriesModalItems}
+          groupLabel={groupKey(seriesModalItems[0].source, root)}
+          allItems={allItems || []}
+          root={root}
+          onClose={() => setSeriesModalItems(null)}
+        />
       )}
     </section>
   );

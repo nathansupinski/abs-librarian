@@ -11,7 +11,7 @@ const FLAG_DEFS = [
   { key: 'forceDeleteAudioJunk', label: '--force-delete-audio-junk', desc: 'Bypass audio-extension safety check (rarely needed)' },
 ];
 
-export default function RunControls() {
+export default function RunControls({ noPlan = false, initialRoot = '' }) {
   const qc = useQueryClient();
   const { data: plan } = usePlan();
   const updateSettings = useUpdateSettings();
@@ -29,6 +29,7 @@ export default function RunControls() {
     forceDeleteAudioJunk: false,
   });
   const [dupFolderInput, setDupFolderInput] = useState('');
+  const [rootInput, setRootInput]     = useState(initialRoot);
   const logRef  = useRef(null);
   const outputRef = useRef('');
 
@@ -58,6 +59,8 @@ export default function RunControls() {
         setRunning(false);
         setExitCode(msg.code);
         qc.invalidateQueries({ queryKey: ['plan'] });
+      } else if (msg.event === 'plan-updated') {
+        qc.invalidateQueries({ queryKey: ['plan'] });
       }
     };
 
@@ -69,8 +72,14 @@ export default function RunControls() {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [output]);
 
-  const startDryRun = () =>
-    fetch('/api/run/dry-run', { method: 'POST' }).catch(() => {});
+  const startDryRun = () => {
+    const body = rootInput.trim() ? JSON.stringify({ root: rootInput.trim() }) : undefined;
+    fetch('/api/run/dry-run', {
+      method: 'POST',
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body,
+    }).catch(() => {});
+  };
 
   const startExecute = () =>
     fetch('/api/run/execute', {
@@ -98,6 +107,35 @@ export default function RunControls() {
       background: 'var(--color-surface-2)',
       borderBottom: '1px solid var(--color-border)',
     }}>
+      {/* Library root row — always visible */}
+      <div style={{
+        padding: '8px 16px',
+        borderBottom: '1px solid var(--color-border)',
+        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+      }}>
+        <span style={{ fontSize: 12, color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
+          Library root:
+        </span>
+        <input
+          type="text"
+          value={rootInput}
+          onChange={e => setRootInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && !running && startDryRun()}
+          placeholder="/mnt/user/Audiobooks"
+          style={{
+            flex: 1, minWidth: 280,
+            background: 'var(--color-surface)', border: '1px solid var(--color-border)',
+            borderRadius: 4, padding: '4px 10px', fontSize: 13,
+            color: 'var(--color-text)', fontFamily: 'monospace',
+          }}
+        />
+        {noPlan && !rootInput.trim() && (
+          <span style={{ fontSize: 11, color: 'var(--color-warning)' }}>
+            Enter a path above to enable dry run
+          </span>
+        )}
+      </div>
+
       {/* Controls row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px' }}>
 
@@ -105,7 +143,7 @@ export default function RunControls() {
         <button
           className="btn btn-primary"
           onClick={startDryRun}
-          disabled={running}
+          disabled={running || (noPlan && !rootInput.trim())}
           title="Regenerate plan.json from the audiobooks directory"
         >
           {running && runType === 'dry-run'
@@ -118,8 +156,8 @@ export default function RunControls() {
         <button
           className="btn btn-warning"
           onClick={startExecute}
-          disabled={running}
-          title="Apply the plan — move and delete files"
+          disabled={running || noPlan}
+          title={noPlan ? 'Run a dry-run first to generate a plan' : 'Apply the plan — move and delete files'}
         >
           {running && runType === 'execute'
             ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />

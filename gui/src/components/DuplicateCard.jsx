@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Star, Loader2 } from 'lucide-react';
-import { useResolveDuplicate, useUndoDuplicate, useDupMeta } from '../hooks/usePlan.js';
+import { useResolveDuplicate, useUndoDuplicate, useDismissDuplicate, useDupMeta } from '../hooks/usePlan.js';
 
 function formatSize(bytes) {
   if (!bytes) return '—';
@@ -75,6 +75,7 @@ export default function DuplicateCard({ dup, index, root, duplicatesFolder }) {
   const [loadMeta, setLoadMeta] = useState(false);
   const resolve = useResolveDuplicate();
   const undo    = useUndoDuplicate();
+  const dismiss = useDismissDuplicate();
 
   const hasMeta = dup.f1Meta && dup.f2Meta;
   const { data: fetchedMeta, isFetching } = useDupMeta(index, loadMeta && !hasMeta);
@@ -98,6 +99,11 @@ export default function DuplicateCard({ dup, index, root, duplicatesFolder }) {
         {dup.resolution && (
           <span style={{ marginLeft: 'auto', color: 'var(--color-success)', fontSize: 11 }}>
             ✓ Keeping {dup.resolution.keep === 'f1' ? 'File 1' : 'File 2'}
+          </span>
+        )}
+        {dup.dismissed && !dup.resolution && (
+          <span style={{ marginLeft: 'auto', color: 'var(--color-muted)', fontSize: 11 }}>
+            ✗ Marked as not a duplicate
           </span>
         )}
       </div>
@@ -145,7 +151,7 @@ export default function DuplicateCard({ dup, index, root, duplicatesFolder }) {
 
       {/* Actions */}
       <div style={{ padding: '10px 16px', borderTop: '1px solid var(--color-border)', display: 'flex', gap: 8, alignItems: 'center' }}>
-        {!dup.resolution ? (
+        {!dup.resolution && !dup.dismissed ? (
           <>
             <button className="btn btn-success"
               style={{ flex: 1 }}
@@ -161,6 +167,12 @@ export default function DuplicateCard({ dup, index, root, duplicatesFolder }) {
               title={duplicatesFolder ? `Keep File 2 — File 1 will be moved to ${duplicatesFolder}` : 'Keep File 2 — File 1 will be deleted (requires --delete-junk)'}>
               {recommendation === 'f2' && '★ '}Keep File 2
             </button>
+            <button className="btn btn-ghost"
+              onClick={() => dismiss.mutate(index)}
+              disabled={dismiss.isPending}
+              title="Mark as not a duplicate — both files stay in place and no action is taken">
+              Not a duplicate
+            </button>
             <button className="btn btn-ghost" onClick={() => {}}>
               Decide Later
             </button>
@@ -168,7 +180,9 @@ export default function DuplicateCard({ dup, index, root, duplicatesFolder }) {
         ) : (
           <>
             <span style={{ flex: 1, color: 'var(--color-muted)', fontSize: 12 }}>
-              {duplicatesFolder ? (
+              {dup.dismissed ? (
+                <>Both files kept in place.</>
+              ) : duplicatesFolder ? (
                 <>Will move to <code style={{ fontSize: 11 }}>{duplicatesFolder}</code>: <code style={{ fontSize: 11 }}>{shorten(dup.resolution.deleteFile)}</code></>
               ) : (
                 <>Will delete: <code style={{ fontSize: 11 }}>{shorten(dup.resolution.deleteFile)}</code></>

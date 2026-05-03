@@ -6,6 +6,7 @@ import {
 } from './fs-utils.mjs';
 import { loadIgnoreFile, matchedIgnoreRule } from './ignore.mjs';
 import { readTags, recommendDuplicate, searchOpenLibrary } from './metadata.mjs';
+import { resolver as metadataResolver } from '../providers/index.mjs';
 import { createPlanState, buildPlanOutput, writePlan, writeGlossary } from './plan.mjs';
 import { loadUserMappings } from './user-mappings.mjs';
 import { loadRules } from '../rules/loader.mjs';
@@ -14,8 +15,9 @@ import { loadRules } from '../rules/loader.mjs';
 // SCAN IMPLEMENTATION
 // ============================================================
 
-export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ignoreFilePath, duplicatesFolder } = {}) {
+export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ignoreFilePath, duplicatesFolder, scope } = {}) {
   console.log('=== DRY-RUN: Scanning audiobooks directory ===\n');
+  if (scope) console.log(`Scope filter: only top-level dirs containing "${scope}"\n`);
 
   const ignoreRules = loadIgnoreFile(ignoreFilePath);
   if (ignoreRules.length > 0)
@@ -43,6 +45,7 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     listDir, statOf, isAudio, isSystemFile, isJunkFile,
     hasAudioRecursive, isDoubleNested,
     readTags, recommendDuplicate, searchOpenLibrary,
+    resolveMetadata: (q) => metadataResolver.resolve(q),
     scanBookForJunk,
   };
 
@@ -66,9 +69,12 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
 
   // ---- Pass 2: root-level directories --------------------------------
   console.log('\n[Pass 2] Top-level directories...');
+  const scopeLc = scope?.toLowerCase();
   for (const e of rootEntries) {
     const p = path.join(root, e);
     if (!statOf(p)?.isDirectory()) continue;
+
+    if (scopeLc && !e.toLowerCase().includes(scopeLc)) continue;
 
     if (HARD_SKIP.has(e)) { addSkip(p, 'hard-protected directory'); continue; }
 
@@ -121,36 +127,46 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
 
   async function classifyRootMp3(filePath, filename) {
     const name = path.basename(filename, path.extname(filename));
-    const tags = await readTags(filePath);
+    const tags = await readTags(filePath, true);
     let author = tags.artist, bookTitle = tags.album || name;
     let method = 'id3-tags', confidence = author ? 'high' : 'none', ambiguous = false;
-    let searchDocs = null;
+    let providerMatch = null;
 
     if (!author) {
-      method = 'openlibrary';
-      const r = await searchOpenLibrary(name);
-      searchDocs = r.docs;
-      if (r.found && !r.ambiguous)     { author = r.docs[0].author; bookTitle = r.docs[0].title || name; confidence = 'medium'; }
-      else if (r.found && r.ambiguous) { confidence = 'low'; ambiguous = true; }
+      const r = await metadataResolver.resolve({ title: name, author: null, duration: tags.duration });
+      if (r) {
+        providerMatch = r;
+        method = `provider:${r.provider}`;
+        if (r.confidence >= 0.5) {
+          author = r.author;
+          bookTitle = r.title || name;
+          confidence = r.confidence >= 0.75 ? 'medium' : 'low';
+        } else {
+          ambiguous = true;
+          confidence = 'low';
+        }
+      }
     }
 
     addLookup({ filename, method,
       result: author ? `${author} / ${bookTitle}` : 'NOT FOUND',
       confidence, ambiguous,
-      notes: searchDocs
-        ? `OL: ${searchDocs.map(d => `"${d.title}" by ${d.author}`).join(' | ')}`
+      notes: providerMatch
+        ? `${providerMatch.provider}: "${providerMatch.title}" by ${providerMatch.author} (${Math.round(providerMatch.confidence * 100)}%)`
         : `ID3: artist="${tags.artist || ''}", album="${tags.album || ''}"`,
     });
 
     if (!author || ambiguous) {
       addBestGuess(filePath, null, path.join(root, '_NeedsReview', filename),
         'root-level MP3 — author unknown',
-        ambiguous ? `Ambiguous: multiple authors found for "${name}"`
-                  : `Could not identify author for "${name}"`);
+        ambiguous ? `Ambiguous: multiple results for "${name}"`
+                  : `Could not identify author for "${name}"`,
+        providerMatch ? { providerMatch } : {});
       return;
     }
     addMove(filePath, path.join(root, author, bookTitle, filename),
-      `root-level MP3 → ${author}/${bookTitle}/`);
+      `root-level MP3 → ${author}/${bookTitle}/`,
+      '', providerMatch ? { providerMatch } : {});
   }
 
   async function classifyMisplacedBookFolder(dirPath, dirName, info) {
@@ -178,33 +194,50 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
   async function classifyUnknownTopLevelBook(dirPath, dirName) {
     const af = listDir(dirPath).find(isAudio);
     let author = null, bookTitle = dirName;
+    let fileDuration = null;
     if (af) {
-      const tags = await readTags(path.join(dirPath, af));
+      const tags = await readTags(path.join(dirPath, af), true);
       author = tags.artist;
       if (tags.album) bookTitle = tags.album;
+      fileDuration = tags.duration;
     }
     let method = 'id3-tags', confidence = author ? 'medium' : 'none', ambiguous = false;
+    let providerMatch = null;
 
     if (!author) {
-      method = 'openlibrary';
-      const r = await searchOpenLibrary(dirName);
-      if (r.found && !r.ambiguous)     { author = r.docs[0].author; bookTitle = r.docs[0].title || dirName; confidence = 'medium'; }
-      else if (r.found && r.ambiguous) { ambiguous = true; confidence = 'low'; }
+      const r = await metadataResolver.resolve({ title: dirName, author: null, duration: fileDuration });
+      if (r) {
+        providerMatch = r;
+        method = `provider:${r.provider}`;
+        if (r.confidence >= 0.5) {
+          author = r.author;
+          bookTitle = r.title || dirName;
+          confidence = r.confidence >= 0.75 ? 'medium' : 'low';
+        } else {
+          ambiguous = true;
+          confidence = 'low';
+        }
+      }
     }
 
     addLookup({ filename: dirName, method,
       result: author ? `${author} / ${bookTitle}` : 'NOT FOUND',
       confidence, ambiguous,
-      notes: `Top-level dir with ${listDir(dirPath).filter(isAudio).length} audio files at root`,
+      notes: providerMatch
+        ? `${providerMatch.provider}: "${providerMatch.title}" by ${providerMatch.author} (${Math.round(providerMatch.confidence * 100)}%)`
+        : `Top-level dir with ${listDir(dirPath).filter(isAudio).length} audio files at root`,
     });
 
     const fallback = path.join(root, '_NeedsReview', dirName);
     if (!author || ambiguous) {
       addBestGuess(dirPath, null, fallback, 'unknown top-level book dir — author unresolved',
-        ambiguous ? 'Ambiguous search results' : 'No author info found');
+        ambiguous ? 'Ambiguous search results' : 'No author info found',
+        providerMatch ? { providerMatch } : {});
       return;
     }
-    addMove(dirPath, path.join(root, author, bookTitle), `unknown top-level book dir → ${author}/${bookTitle}/`);
+    addMove(dirPath, path.join(root, author, bookTitle),
+      `unknown top-level book dir → ${author}/${bookTitle}/`,
+      '', providerMatch ? { providerMatch } : {});
   }
 
   async function processAuthorDir(authorPath, authorName) {
