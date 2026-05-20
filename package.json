@@ -12,7 +12,7 @@
     "execute": "node reorganize.mjs --execute",
     "build:gui": "cd gui && npm install && npm run build",
     "start:gui": "node gui.mjs",
-    "dev": "concurrently -n api,ui -c cyan,magenta \"nodemon\" \"cd gui && npm run dev\""
+    "dev": "concurrently --kill-others -n api,ui -c cyan,magenta \"nodemon\" \"cd gui && npm run dev\""
   },
   "keywords": ["audiobookshelf", "audiobooks", "organize", "library"],
   "license": "MIT",

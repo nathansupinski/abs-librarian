@@ -136,17 +136,19 @@ export default class SeriesDetectionRule extends ScanRule {
       if (!ctx.hasAudioRecursive(bookPath)) continue;
 
       const pos = positionByPath.get(bookPath);
-      const queryTitle = pos?.cleanTitle ?? cleanBookTitle(bookDir);
+      const queryTitle = pos?.cleanTitle ?? cleanBookTitle(bookDir, authorName);
       const knownSeq   = pos?.sequence ?? null;
 
       // Only trust the duration when there's a single audio file at the top
       // level (typical m4b case). For multi-file books, a per-file duration
       // is wildly off vs. the provider's total runtime and corrupts scoring.
       let duration = null;
+      let durationTimedOut = false;
       const audioFiles = ctx.listDir(bookPath).filter(ctx.isAudio);
       if (audioFiles.length === 1) {
         const tags = await ctx.readTags(path.join(bookPath, audioFiles[0]), true);
         duration = tags.duration ?? null;
+        durationTimedOut = tags._durationTimedOut ?? false;
       }
 
       const r = await ctx.resolveMetadata({
@@ -162,12 +164,24 @@ export default class SeriesDetectionRule extends ScanRule {
       const seriesName = cleanSeriesName(chosen.series);
       const sequence = knownSeq ?? (chosen.sequence != null ? formatSeq(String(chosen.sequence)) : null);
 
+      // If the folder name matches the returned series name, this is a series
+      // container directory (e.g. "Harry Potter/"), not a specific book.
+      // Claiming it would move it inside itself — skip it here and let the
+      // NestedSeriesContainerRule extract its contents instead.
+      const folderLc = bookDir.toLowerCase().replace(/^the\s+/i, '');
+      const seriesLc = seriesName.toLowerCase().replace(/^the\s+/i, '');
+      if (folderLc === seriesLc) {
+        this.#log(`"${bookDir}" matches series name "${seriesName}" — skipping as series container`);
+        continue;
+      }
+
       knownSeries.set(seriesName.toLowerCase(), seriesName);
       this.#detected.set(bookPath, {
         series: seriesName, sequence, title: r.title || queryTitle,
         source: `provider:${r.provider}`,
         confidence: r.confidence >= 0.85 ? 'high' : 'medium',
         providerMatch: r,
+        durationTimedOut,
       });
       resolved.add(bookPath);
       this.#log(`provider matched "${r.title}" → ${seriesName} #${sequence ?? '?'} (${r.confidence.toFixed(2)})`);
@@ -180,17 +194,23 @@ export default class SeriesDetectionRule extends ScanRule {
       if (resolved.has(bookPath)) continue;
       if (!ctx.hasAudioRecursive(bookPath)) continue;
 
-      const lcName = bookDir.toLowerCase();
+      const lcName  = bookDir.toLowerCase();
+      const folderLc = lcName.replace(/^the\s+/i, '');
       let match = null;
       for (const [lc, name] of knownSeries) {
-        if (lc.length >= 4 && lcName.includes(lc)) { match = name; break; }
+        if (lc.length < 4) continue;
+        // Skip when the folder name IS the series — it's the series container,
+        // not a book within it. Claiming it would move the dir into itself.
+        // The NestedSeriesContainerRule handles extracting its contents.
+        if (folderLc === lc.replace(/^the\s+/i, '')) continue;
+        if (lcName.includes(lc)) { match = name; break; }
       }
       if (!match) continue;
 
       this.#detected.set(bookPath, {
         series: match,
         sequence: null,
-        title: cleanBookTitle(bookDir).replace(new RegExp(`\\s*[-_:]?\\s*${escapeRegex(match)}.*$`, 'i'), '').trim() || bookDir,
+        title: cleanBookTitle(bookDir, authorName).replace(new RegExp(`\\s*[-_:]?\\s*${escapeRegex(match)}.*$`, 'i'), '').trim() || bookDir,
         source: 'author-series-substring',
         confidence: 'low',
       });
@@ -206,12 +226,13 @@ export default class SeriesDetectionRule extends ScanRule {
     if (!pre?.series) return false;
     if (!ctx.hasAudioRecursive(bookPath)) return true; // claim but no move
 
-    const { series, sequence, title, source, confidence, providerMatch, groupSize } = pre;
+    const { series, sequence, title, source, confidence, providerMatch, groupSize, durationTimedOut } = pre;
     const seqStr = sequence ? `${sequence} - ` : '';
     const dest   = path.join(authorPath, series, `${seqStr}${title}`);
 
     const opts = { series: { name: series, sequence } };
     if (providerMatch) opts.providerMatch = providerMatch;
+    if (durationTimedOut) opts.warnings = ['Audio duration unavailable (file too large to scan in time). Provider match based on title & author only — verify destination is correct.'];
 
     const seriesLabel = `${series}${sequence ? ` #${sequence}` : ''}`;
     const noteParts = [];

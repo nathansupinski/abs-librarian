@@ -62,9 +62,13 @@ function scoreResult(query, result) {
   const rNorm = normalizeTitle(result.title);
   let titleSim = 1 - levenshteinNorm(qNorm, rNorm);
   // Substring containment is treated as a strong title match (handles subtitles
-  // and prefixes added to folder names by importers).
+  // and prefixes added to folder names by importers) — but only when the two
+  // strings are within 2x of each other. A short result title embedded in a
+  // much longer folder name (e.g. "Knights Magi The Spellmonger Series Book 4
+  // - Terry Mancour" contains "Spellmonger") would otherwise falsely score 0.9.
   if (qNorm && rNorm && (qNorm.includes(rNorm) || rNorm.includes(qNorm))) {
-    titleSim = Math.max(titleSim, 0.9);
+    const lenRatio = Math.min(qNorm.length, rNorm.length) / Math.max(qNorm.length, rNorm.length);
+    if (lenRatio >= 0.5) titleSim = Math.max(titleSim, 0.9);
   }
   const authorSim = (query.author && result.author)
     ? 1 - levenshteinNorm(normalizeTitle(query.author), normalizeTitle(result.author))
@@ -100,6 +104,9 @@ export class MetadataResolver {
   // (e.g. OpenLibrary always nulls it) are kept.
   #language = 'english';
 
+  #debug = !!process.env.ABS_DEBUG;
+  #log(...args) { if (this.#debug) console.log('[provider]', ...args); }
+
   constructor(options = {}) {
     this.providers = options.providers ?? [
       new AudibleProvider(),
@@ -133,6 +140,7 @@ export class MetadataResolver {
 
     const queryTitleNorm = normalizeTitle(query.title);
     for (const provider of this.providers) {
+      this.#log(`querying ${provider.name}: "${query.title}"${query.author ? ` by ${query.author}` : ''}`);
       let results;
       try { results = await provider.search(query); } catch { results = []; }
 
@@ -153,9 +161,10 @@ export class MetadataResolver {
         })
         .sort((a, b) => b._confidence - a._confidence);
 
-      if (!scored.length) continue;
+      if (!scored.length) { this.#log(`  ${provider.name}: no matching results`); continue; }
 
       const top = preferSeries(scored, preferredLc, this.#preferTolerance);
+      this.#log(`  ${provider.name}: "${top.title}" conf=${top._confidence.toFixed(2)} series=[${(top.series||[]).map(s=>s.series).join(', ')}]`);
       if (!best || top._confidence > best._confidence) best = top;
       if (top._confidence >= this.#confidenceThreshold) break;
     }
@@ -164,6 +173,7 @@ export class MetadataResolver {
 
     // Enrich with Audnexus when we have an ASIN (audiobook-specific data: chapters, narrator)
     if (best.asin && this.enrichmentProvider) {
+      this.#log(`enriching via Audnexus: asin=${best.asin}`);
       try {
         const enriched = await this.enrichmentProvider.search({ asin: best.asin });
         if (enriched.length) {

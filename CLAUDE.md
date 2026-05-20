@@ -123,6 +123,7 @@ Passed to every hook. Contains: `addMove`, `addJunkMove`, `addJunkDelete`, `addB
 | `series-code-format.mjs` | 20 | `M C Beaton - AR##/HM## Title [NofM]` + `Agatha Raisin NN - Title` |
 | `combined-chapters-duplicate.mjs` | 25 | One large combined file + many chapter files in same folder |
 | `series-detection.mjs` | 27 | Embedded series in folder names + author-level provider lookup |
+| `nested-series-container.mjs` | 29 | Container dir with a "mixed leaf" — one folder directly holding audio from 2+ distinct albums |
 | `mismatched-files-in-folder.mjs` | 30 | Audio files whose ID3 album tags don't match the container folder |
 
 #### `series-detection.mjs` — author-scoped strategies
@@ -137,13 +138,47 @@ sharing a per-author `knownSeries` set across passes:
 3. **Provider lookup** — every still-unmatched book gets a single
    `resolveMetadata` call. The picker prefers series with a sequence over
    meta-series (so e.g. Stormlight Archive #1 beats The Cosmere #?), and
-   prefers entries already in `knownSeries` for this author.
+   prefers entries already in `knownSeries` for this author. **Guard:** if the
+   folder name matches the returned series name (after stripping a leading
+   "The"), the folder is a series container — it is skipped here and left for
+   `nested-series-container.mjs` to handle.
 4. **Substring fallback** — for books still unmatched, if the folder name
    contains a series name from `knownSeries`, claim it (low confidence,
    no sequence). Catches specials/audio dramas providers don't index.
 
 Results are cached on the rule instance and surfaced in `onBookDir`. Set
 `ABS_DEBUG_SERIES=1` (or `--debug-rules`) to log per-decision output.
+
+#### `nested-series-container.mjs` — mixed-leaf extraction
+
+Runs in `onBookDir` and targets one narrow pattern: a directory with **no audio
+at its own root level** that contains, somewhere underneath, a **mixed leaf** —
+a single directory directly holding audio files whose ID3 album tags span 2+
+distinct titles (e.g. Harry Potter/03 - .../02 - .../[7 different books].mp3).
+
+Algorithm:
+1. Walk every audio-bearing directory under the book dir; record its files +
+   ID3 tags.
+2. Filter to "mixed leaves": directories whose **own** audio files span 2+
+   distinct albums. If none, return false.
+3. Group all files in mixed leaves by album tag.
+4. For each group, call `resolveMetadata({ title, author, duration,
+   preferredSeries: [bookName] })` to get a series sequence number (best-effort,
+   confidence ≥ 0.55).
+5. Emit `MOVE_FILE` items to `Author/Container/[Seq - ]AlbumTitle/filename`.
+6. Files with no album tag → `addBestGuess` to `_NeedsReview/`.
+
+Two design choices keep the rule narrow:
+- **Mixed-leaf trigger**: pure leaves (each subfolder = one book's chapters)
+  never trigger the rule, regardless of whether folder names exactly match
+  album tags. This rule does not renumber or rename per-book subfolders —
+  that is outside its scope.
+- **Album tag = destination name**: the ID3 album tag is the ground truth for
+  the folder name, not the (potentially wrong) parent directory name. Prevents
+  wrongly-named folders like `*(Full-Cast Edition)*` from polluting the output.
+
+Defense-in-depth: any plan item whose computed destination equals its source
+is dropped before emission.
 
 ### Adding a New Rule
 

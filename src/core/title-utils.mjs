@@ -1,5 +1,7 @@
 const BOOK_WORD_NUMBERS = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)';
 
+function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
 /**
  * Strip series/book-number suffixes from audiobook folder names so the clean
  * title can be sent to metadata providers.
@@ -13,8 +15,13 @@ const BOOK_WORD_NUMBERS = '(?:zero|one|two|three|four|five|six|seven|eight|nine|
  *   "The Final Empire: Mistborn Book 1 (Unabridged)"    → "The Final Empire"
  *   "The Way of Kings-Book One of The Stormlight Archive" → "The Way of Kings"
  *   "Oathbringer-Book Three of The Stormlight Archive"  → "Oathbringer"
+ *
+ * When `author` is provided, also strips a trailing "- {author}" suffix that
+ * downloaders often append:
+ *   "Knights Magi The Spellmonger Series Book 4 - Terry Mancour"
+ *     (with author="Terry Mancour") → "Knights Magi"
  */
-export function cleanBookTitle(name) {
+export function cleanBookTitle(name, author = null) {
   let t = name.trim();
   // Strip trailing edition/format markers in parens/brackets first
   // "(Unabridged)", "[Audiobook]", "(Special Edition)" etc.
@@ -22,6 +29,10 @@ export function cleanBookTitle(name) {
     const before = t;
     t = t.replace(/\s*[\[(][^\])]*(unabridged|audiobook|audio drama|special edition|anniversary)[^\])]*[\])]\s*$/i, '').trim();
     if (t === before) break;
+  }
+  // Trailing "- Author" suffix when author is known (common downloader artifact)
+  if (author) {
+    t = t.replace(new RegExp(`\\s*[-–_]\\s*${escapeRegex(author)}\\s*$`, 'i'), '').trim() || t;
   }
   // "Title[-_:] Series Name, Book N[...]"
   t = t.replace(/\s*[-_:]\s*.+?,\s*Book\s+\d+(?:\.\d+)?.*$/i, '');
@@ -33,6 +44,15 @@ export function cleanBookTitle(name) {
   t = t.replace(new RegExp(`\\s*[-_:]\\s*Book\\s+${BOOK_WORD_NUMBERS}(?:\\s+of\\s+.+)?$`, 'i'), '');
   // "Title (Series, #N)" or "(Series, Book N)" in trailing parens/brackets
   t = t.replace(/\s*[\[(][^\])]*(Book\s+\d+|#\s*\d+)[^\])]*[\])]\s*$/i, '');
+  // "Title [The] SeriesName Series Book N"  (no separator — "Series" is the marker).
+  // Lazy title + optional "The" + one series word is the simple form; expanded
+  // backtracking lets the title grow until the suffix matches. Optional "The"
+  // is what gives the title the chance to keep "Magi" instead of leaving it on
+  // the series side ("Knights Magi The Spellmonger Series Book 4" → "Knights Magi").
+  t = t.replace(/^(.+?)(?:\s+The)?\s+\S+\s+Series\s+Book\s+\d+(?:\.\d+)?\s*$/i, '$1');
+  // "Title Book N"  (no separator at all — e.g. "Spellmonger Spellmonger Book 1").
+  // Greedy title keeps as many words as possible before "Book N".
+  t = t.replace(/^(.+)\s+Book\s+\d+(?:\.\d+)?\s*$/i, '$1');
   // Leading "Book N - Title" / "Vol N - Title" / "Volume N - Title"
   t = t.replace(/^(?:Book|Vol(?:ume)?|Part|Chapter|Episode)\s+\d+(?:\.\d+)?\s*[-–:]\s*/i, '');
   return t.trim() || name;

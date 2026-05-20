@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Square, Terminal, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
+import { Play, Square, Terminal, ChevronDown, ChevronUp, Loader2, FolderOpen } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { usePlan, useUpdateSettings } from '../hooks/usePlan.js';
+import FolderBrowser from './FolderBrowser.jsx';
 
 const FLAG_DEFS = [
   { key: 'autoAcceptReview',     label: '--auto-accept-review',     desc: 'Move best-guesses to their suggested dest instead of _NeedsReview/' },
@@ -30,6 +31,7 @@ export default function RunControls({ noPlan = false, initialRoot = '' }) {
   });
   const [dupFolderInput, setDupFolderInput] = useState('');
   const [rootInput, setRootInput]     = useState(initialRoot);
+  const [showBrowser, setShowBrowser] = useState(false);
   const logRef  = useRef(null);
   const outputRef = useRef('');
 
@@ -129,10 +131,25 @@ export default function RunControls({ noPlan = false, initialRoot = '' }) {
             color: 'var(--color-text)', fontFamily: 'monospace',
           }}
         />
+        <button
+          className="btn btn-ghost"
+          onClick={() => setShowBrowser(true)}
+          title="Browse for folder"
+          style={{ padding: '3px 8px' }}
+        >
+          <FolderOpen size={13} />
+        </button>
         {noPlan && !rootInput.trim() && (
           <span style={{ fontSize: 11, color: 'var(--color-warning)' }}>
             Enter a path above to enable dry run
           </span>
+        )}
+        {showBrowser && (
+          <FolderBrowser
+            initialPath={rootInput.trim() || '/'}
+            onSelect={p => setRootInput(p)}
+            onClose={() => setShowBrowser(false)}
+          />
         )}
       </div>
 

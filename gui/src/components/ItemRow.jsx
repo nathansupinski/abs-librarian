@@ -1,13 +1,21 @@
 import React, { useState } from 'react';
-import { CheckCircle, MinusCircle, ChevronRight, ChevronDown, Edit2, BookOpen } from 'lucide-react';
+import { CheckCircle, MinusCircle, ChevronRight, ChevronDown, Edit2, BookOpen, AlertTriangle } from 'lucide-react';
 import { useUpdateItem } from '../hooks/usePlan.js';
 import BestGuessModal from './BestGuessModal.jsx';
 
 function Badge({ item }) {
-  if (item.bestGuess) return <span className="badge badge-guess">GUESS</span>;
-  if (item.junk)      return <span className="badge badge-junk">JUNK</span>;
-  if (item.type === 'MOVE_DIR')  return <span className="badge badge-dir">DIR</span>;
-  return <span className="badge badge-file">FILE</span>;
+  // DIR/FILE always renders so users can tell whether a whole folder or a
+  // single file moves. GUESS/JUNK render alongside when applicable.
+  const typeBadge = item.type === 'MOVE_DIR'
+    ? <span className="badge badge-dir">DIR</span>
+    : <span className="badge badge-file">FILE</span>;
+  return (
+    <>
+      {typeBadge}
+      {item.bestGuess && <span className="badge badge-guess">GUESS</span>}
+      {item.junk      && <span className="badge badge-junk">JUNK</span>}
+    </>
+  );
 }
 
 function ProviderBadge({ providerMatch }) {
@@ -31,6 +39,18 @@ function SeriesBadge({ series }) {
   return (
     <span className="badge badge-series" title={`Series: ${label}`}>
       {label}
+    </span>
+  );
+}
+
+function WarningBadge({ warnings }) {
+  if (!warnings?.length) return null;
+  return (
+    <span
+      title={warnings.join('\n')}
+      style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}
+    >
+      <AlertTriangle size={13} style={{ color: 'var(--color-warning)' }} />
     </span>
   );
 }
@@ -123,6 +143,7 @@ export default function ItemRow({ item, root, selected, onSelect, allVisibleIds 
         <Badge item={item} />
         <ProviderBadge providerMatch={item.providerMatch} />
         <SeriesBadge series={item.series} />
+        <WarningBadge warnings={item.warnings} />
 
         {/* Expand toggle */}
         <div style={{ flexShrink: 0, color: 'var(--color-border)', width: 14 }}>
@@ -197,6 +218,16 @@ export default function ItemRow({ item, root, selected, onSelect, allVisibleIds 
           <FullPathRow label="SRC"  path={item.source} />
           {item.dest        && <FullPathRow label="DEST"     path={item.dest}        />}
           {item.fallbackDest && <FullPathRow label="FALLBACK" path={item.fallbackDest} dim />}
+          {item.warnings?.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 2 }}>
+              {item.warnings.map((w, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 5, color: 'var(--color-warning)', fontSize: 11 }}>
+                  <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
           {item.notes && (
             <div style={{ color: 'var(--color-muted)', fontSize: 11, marginTop: 2 }}>{item.notes}</div>
           )}

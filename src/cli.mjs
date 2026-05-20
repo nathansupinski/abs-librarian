@@ -19,7 +19,7 @@ export async function runCLI(argv) {
     .option('--ignore-file <path>', 'Gitignore-style file; matched paths are preserved')
     .option('--duplicates-folder <path>', 'Move resolved duplicates here instead of deleting them')
     .option('--scope <substr>', 'Scan only top-level dirs whose name contains this substring (debug)')
-    .option('--debug-rules', 'Print verbose rule decisions to stdout')
+    .option('--debug-rules', 'Print verbose rule, provider, and metadata debug output to stdout')
     .allowUnknownOption(false);
 
   program.parse(argv);
@@ -42,7 +42,7 @@ export async function runCLI(argv) {
     });
   } else {
     const duplicatesFolder = opts.duplicatesFolder ? path.resolve(opts.duplicatesFolder) : undefined;
-    if (opts.debugRules) process.env.ABS_DEBUG_SERIES = '1';
+    if (opts.debugRules) { process.env.ABS_DEBUG_SERIES = '1'; process.env.ABS_DEBUG = '1'; }
     await runDryScan(root, {
       planFile, glossaryPath: glossary, ignoreFile, duplicatesFolder,
       scope: opts.scope || undefined,

@@ -1,9 +1,61 @@
 import https from 'https';
-import { parseFile } from 'music-metadata';
+import path from 'path';
+import { createReadStream } from 'fs';
+import { parseFile, parseStream } from 'music-metadata';
+
+const DEBUG = () => !!process.env.ABS_DEBUG;
+
+// How long to wait for a full (duration-scanning) parse before giving up.
+// Large MP3s with missing VBR headers require CPU-intensive per-frame scanning;
+// a 938 MB file can exceed 30 seconds. When we time out, we destroy the stream
+// so the file handle is released and the event loop stays clean.
+const FULL_PARSE_TIMEOUT_MS = 10_000;
 
 export async function readTags(filePath, full = false) {
   try {
-    const meta = await parseFile(filePath, { duration: full, skipPostHeaders: !full });
+    let meta;
+    let durationTimedOut = false;
+
+    if (full) {
+      const ext = path.extname(filePath).toLowerCase();
+      const mimeType = ext === '.mp3' ? 'audio/mpeg'
+        : ext === '.m4b' || ext === '.m4a' ? 'audio/mp4'
+        : ext === '.flac' ? 'audio/flac'
+        : ext === '.ogg' ? 'audio/ogg'
+        : ext === '.opus' ? 'audio/opus'
+        : ext === '.wav' ? 'audio/wav'
+        : ext === '.wma' ? 'audio/x-ms-wma'
+        : undefined;
+
+      const stream = createReadStream(filePath);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        stream.destroy(new Error('readTags-timeout'));
+      }, FULL_PARSE_TIMEOUT_MS);
+
+      try {
+        meta = await parseStream(stream, mimeType ? { mimeType } : undefined, { duration: true });
+        clearTimeout(timer);
+      } catch {
+        clearTimeout(timer);
+        if (timedOut) {
+          durationTimedOut = true;
+          if (DEBUG()) console.warn(`[metadata] duration scan timeout (>10s): ${path.basename(filePath)} — retrying without duration`);
+          // Quick fallback: read just the header for artist/album/etc.
+          meta = await parseFile(filePath, { duration: false, skipPostHeaders: true }).catch(() => null);
+        } else {
+          meta = null;
+        }
+      }
+    } else {
+      meta = await parseFile(filePath, { duration: false, skipPostHeaders: true });
+    }
+
+    if (!meta) {
+      if (!full) return { artist: null, album: null };
+      return { artist: null, album: null, title: null, year: null, bitrate: null, duration: null, codec: null, _durationTimedOut: false };
+    }
     const c = meta.common;
     const f = meta.format;
     if (!full) return { artist: c.artist || c.albumartist || null, album: c.album || null };
@@ -15,10 +67,11 @@ export async function readTags(filePath, full = false) {
       bitrate:  f.bitrate   ? Math.round(f.bitrate / 1000) : null,
       duration: f.duration  ? Math.round(f.duration)       : null,
       codec:    f.codec     || f.container                  || null,
+      _durationTimedOut: durationTimedOut,
     };
   } catch {
     if (!full) return { artist: null, album: null };
-    return { artist: null, album: null, title: null, year: null, bitrate: null, duration: null, codec: null };
+    return { artist: null, album: null, title: null, year: null, bitrate: null, duration: null, codec: null, _durationTimedOut: false };
   }
 }
 

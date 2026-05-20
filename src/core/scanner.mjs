@@ -131,6 +131,9 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     let author = tags.artist, bookTitle = tags.album || name;
     let method = 'id3-tags', confidence = author ? 'high' : 'none', ambiguous = false;
     let providerMatch = null;
+    const warnings = tags._durationTimedOut
+      ? ['Audio duration unavailable (file too large to scan in time). Provider match based on title & author only — verify destination is correct.']
+      : undefined;
 
     if (!author) {
       const r = await metadataResolver.resolve({ title: name, author: null, duration: tags.duration });
@@ -156,17 +159,18 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
         : `ID3: artist="${tags.artist || ''}", album="${tags.album || ''}"`,
     });
 
+    const itemOpts = { ...(providerMatch ? { providerMatch } : {}), ...(warnings ? { warnings } : {}) };
     if (!author || ambiguous) {
       addBestGuess(filePath, null, path.join(root, '_NeedsReview', filename),
         'root-level MP3 — author unknown',
         ambiguous ? `Ambiguous: multiple results for "${name}"`
                   : `Could not identify author for "${name}"`,
-        providerMatch ? { providerMatch } : {});
+        itemOpts);
       return;
     }
     addMove(filePath, path.join(root, author, bookTitle, filename),
       `root-level MP3 → ${author}/${bookTitle}/`,
-      '', providerMatch ? { providerMatch } : {});
+      '', itemOpts);
   }
 
   async function classifyMisplacedBookFolder(dirPath, dirName, info) {
@@ -195,14 +199,19 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     const af = listDir(dirPath).find(isAudio);
     let author = null, bookTitle = dirName;
     let fileDuration = null;
+    let durationTimedOut = false;
     if (af) {
       const tags = await readTags(path.join(dirPath, af), true);
       author = tags.artist;
       if (tags.album) bookTitle = tags.album;
       fileDuration = tags.duration;
+      durationTimedOut = tags._durationTimedOut ?? false;
     }
     let method = 'id3-tags', confidence = author ? 'medium' : 'none', ambiguous = false;
     let providerMatch = null;
+    const warnings = durationTimedOut
+      ? ['Audio duration unavailable (file too large to scan in time). Provider match based on title & author only — verify destination is correct.']
+      : undefined;
 
     if (!author) {
       const r = await metadataResolver.resolve({ title: dirName, author: null, duration: fileDuration });
@@ -229,15 +238,16 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     });
 
     const fallback = path.join(root, '_NeedsReview', dirName);
+    const itemOpts = { ...(providerMatch ? { providerMatch } : {}), ...(warnings ? { warnings } : {}) };
     if (!author || ambiguous) {
       addBestGuess(dirPath, null, fallback, 'unknown top-level book dir — author unresolved',
         ambiguous ? 'Ambiguous search results' : 'No author info found',
-        providerMatch ? { providerMatch } : {});
+        itemOpts);
       return;
     }
     addMove(dirPath, path.join(root, author, bookTitle),
       `unknown top-level book dir → ${author}/${bookTitle}/`,
-      '', providerMatch ? { providerMatch } : {});
+      '', itemOpts);
   }
 
   async function processAuthorDir(authorPath, authorName) {
