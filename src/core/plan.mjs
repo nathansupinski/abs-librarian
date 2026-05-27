@@ -22,6 +22,18 @@ export function createPlanState() {
   const skipLog         = [];
 
   function _addItem(obj) {
+    // Defense-in-depth: drop no-op and self-nesting moves before they ever
+    // reach plan.json. Catches the class of bugs where a destination is
+    // computed as `${authorPath}/...` while authorPath was already inside the
+    // source dir (e.g. dest = source/Series/Book).
+    const effective = obj.dest || obj.fallbackDest;
+    if (obj.source && effective) {
+      if (obj.source === effective) return;
+      if (effective.startsWith(obj.source + path.sep)) {
+        console.warn(`[plan] dropped self-nesting move: ${obj.source} → ${effective}`);
+        return;
+      }
+    }
     planItems.push({ id: `${obj.type[0]}${planItems.length}`, status: 'pending', ...obj });
   }
 

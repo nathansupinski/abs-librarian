@@ -43,6 +43,24 @@ export default class SeriesDetectionRule extends ScanRule {
     // Author-level set of known series names (lowercase → display name).
     const knownSeries = new Map();
 
+    // Seed knownSeries from any series containers the scanner pre-detected
+    // (e.g. an existing Author/Spellmonger/ dir). This lets Strategy 4
+    // (substring fallback) route author-root books like "Spellmonger
+    // Spellmonger Book 1 - Terry Mancour" into the existing container, and
+    // also lets us skip the container dir itself in Strategy 3.
+    if (ctx.seriesContainers) {
+      for (const [, name] of ctx.seriesContainers) {
+        knownSeries.set(name.toLowerCase(), name);
+      }
+      // The container dirs themselves are handled by the scanner recursion;
+      // exclude them from book-level processing here so we don't try to
+      // re-classify the container as a book.
+      for (const containerName of ctx.seriesContainers.keys()) {
+        const containerPath = path.join(authorPath, containerName);
+        resolved.add(containerPath);
+      }
+    }
+
     // ── Strategy 1: embedded series in folder name ─────────────────────────
     const embeddedGroups = new Map();   // lc-series → { series, books: [{bookPath, cleanTitle, sequence}] }
     const positionOnly   = [];          // {bookPath, cleanTitle, sequence}

@@ -10,6 +10,7 @@ import { resolver as metadataResolver } from '../providers/index.mjs';
 import { createPlanState, buildPlanOutput, writePlan, writeGlossary } from './plan.mjs';
 import { loadUserMappings } from './user-mappings.mjs';
 import { loadRules } from '../rules/loader.mjs';
+import { cleanBookTitle } from './title-utils.mjs';
 
 // ============================================================
 // SCAN IMPLEMENTATION
@@ -47,6 +48,12 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     readTags, recommendDuplicate, searchOpenLibrary,
     resolveMetadata: (q) => metadataResolver.resolve(q),
     scanBookForJunk,
+    // Set by processAuthorDir before iterating; rules can read to learn about
+    // Author/Series/Book structure even before recursing.
+    seriesContainers: null,
+    // Set by processSeriesContainer while recursing into a confirmed series
+    // folder; rules use this to keep destinations under Author/Series/.
+    currentSeries: null,
   };
 
   // ---- Pass 1: root-level files --------------------------------------
@@ -251,28 +258,164 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
   }
 
   async function processAuthorDir(authorPath, authorName) {
-    for (const rule of rules) {
-      if (await rule.onAuthorDir(authorPath, authorName, ctx)) return;
+    const entries = listDir(authorPath).sort();
+
+    // Detect series containers BEFORE running rules so rule hooks
+    // (e.g. series-detection.onAuthorDir) can read ctx.seriesContainers and
+    // seed their own state from it.
+    const seriesContainers = await detectSeriesContainers(authorPath, authorName, entries);
+    ctx.seriesContainers = seriesContainers;
+
+    try {
+      for (const rule of rules) {
+        if (await rule.onAuthorDir(authorPath, authorName, ctx)) return;
+      }
+      console.log(`  ${authorName}`);
+      for (const e of entries) {
+        const p = path.join(authorPath, e);
+        const s = statOf(p);
+        if (!s) continue;
+
+        const rule = checkIgnore(p, s.isDirectory());
+        if (rule) { addSkip(p, `ignore rule: "${rule}"`); continue; }
+
+        if (isSystemFile(e)) { addJunkDelete(p, 'system/metadata file'); continue; }
+
+        if (s.isFile()) {
+          if (isAudio(e))        await processLooseAudio(p, e, authorName, authorPath);
+          else if (isJunkFile(e)) addJunkDelete(p, 'junk file in author dir');
+          else                   addSkip(p, 'misc non-audio file — left in place');
+          continue;
+        }
+        if (s.isDirectory()) {
+          const containerSeries = seriesContainers.get(e);
+          if (containerSeries) {
+            await processSeriesContainer(p, containerSeries, authorName, authorPath);
+          } else {
+            await processBookDir(p, e, authorName, authorPath);
+          }
+        }
+      }
+    } finally {
+      ctx.seriesContainers = null;
     }
-    console.log(`  ${authorName}`);
-    for (const e of listDir(authorPath).sort()) {
+  }
+
+  /**
+   * Identify which children of authorPath are series containers — folders
+   * holding multiple book subdirs that the provider confirms as a real series
+   * whose name matches the folder name.
+   *
+   * Returns Map<dirName, seriesName>. The seriesName is the provider's
+   * canonical form (preserves casing) and is used as the destination folder
+   * when books inside are moved.
+   */
+  async function detectSeriesContainers(authorPath, authorName, entries) {
+    const containers = new Map();
+    for (const e of entries) {
+      if (e.startsWith('.') || HARD_SKIP.has(e) || NON_AUDIOBOOK_DIRS.has(e)) continue;
       const p = path.join(authorPath, e);
       const s = statOf(p);
-      if (!s) continue;
+      if (!s?.isDirectory()) continue;
 
-      const rule = checkIgnore(p, s.isDirectory());
-      if (rule) { addSkip(p, `ignore rule: "${rule}"`); continue; }
+      const children = listDir(p);
+      const directAudio = children.filter(n => isAudio(n) && !n.startsWith('._'));
+      if (directAudio.length > 0) continue;
 
-      if (isSystemFile(e)) { addJunkDelete(p, 'system/metadata file'); continue; }
+      const subdirs = children.filter(n => {
+        const sp = path.join(p, n);
+        return statOf(sp)?.isDirectory() && !n.startsWith('.') && !HARD_SKIP.has(n);
+      });
+      const subdirsWithAudio = subdirs.filter(n => hasAudioRecursive(path.join(p, n)));
+      if (subdirsWithAudio.length < 2) continue;
 
-      if (s.isFile()) {
-        if (isAudio(e))        await processLooseAudio(p, e, authorName, authorPath);
-        else if (isJunkFile(e)) addJunkDelete(p, 'junk file in author dir');
-        else                   addSkip(p, 'misc non-audio file — left in place');
-        continue;
+      // Use the first audio-bearing child's album tag (or, failing that, the
+      // child folder name) as the representative title.
+      const repName = subdirsWithAudio[0];
+      const repPath = path.join(p, repName);
+      const repAudio = listDir(repPath).find(n => isAudio(n) && !n.startsWith('._'));
+      let title = null;
+      let duration = null;
+      if (repAudio) {
+        const tags = await readTags(path.join(repPath, repAudio), true);
+        title = tags.album || null;
+        duration = tags.duration ?? null;
       }
-      if (s.isDirectory()) await processBookDir(p, e, authorName, authorPath);
+      if (!title) title = cleanBookTitle(repName, authorName);
+
+      const r = await metadataResolver.resolve({ title, author: authorName, duration });
+      if (!r || r.confidence < 0.55 || !r.series?.length) continue;
+
+      const folderLc = e.toLowerCase().replace(/^the\s+/i, '');
+      let matched = null;
+      for (const sObj of r.series) {
+        if (!sObj.series) continue;
+        const seriesLc = sObj.series.toLowerCase().replace(/^the\s+/i, '');
+        if (folderLc === seriesLc) { matched = sObj.series; break; }
+      }
+      if (matched) {
+        containers.set(e, matched);
+        addLookup({
+          filename: e,
+          method: `provider:${r.provider}`,
+          result: `series container: ${authorName} / ${matched}`,
+          confidence: r.confidence >= 0.85 ? 'high' : 'medium',
+          notes: `Container holds ${subdirsWithAudio.length} book subdirs; ${r.provider} ${Math.round(r.confidence * 100)}%`,
+        });
+      }
     }
+    return containers;
+  }
+
+  /**
+   * Recurse into a confirmed series container, processing each child subdir
+   * as a book belonging to that series. ctx.currentSeries is set so rules
+   * can produce destinations under Author/Series/Book.
+   */
+  async function processSeriesContainer(containerPath, seriesName, authorName, authorPath) {
+    console.log(`  ${authorName} / [series] ${seriesName}`);
+    const prev = ctx.currentSeries;
+    ctx.currentSeries = seriesName;
+    try {
+      for (const e of listDir(containerPath).sort()) {
+        const p = path.join(containerPath, e);
+        const s = statOf(p);
+        if (!s) continue;
+
+        const rule = checkIgnore(p, s.isDirectory());
+        if (rule) { addSkip(p, `ignore rule: "${rule}"`); continue; }
+
+        if (isSystemFile(e)) { addJunkDelete(p, 'system/metadata file'); continue; }
+
+        if (s.isFile()) {
+          if (isJunkFile(e)) addJunkDelete(p, `junk file in ${authorName}/${seriesName}/`);
+          else if (isAudio(e)) {
+            // A loose audio file directly inside the series container — treat
+            // it as a book under the series.
+            await processLooseAudioInSeries(p, e, seriesName, authorName, authorPath);
+          }
+          else addSkip(p, 'misc non-audio file — left in place');
+          continue;
+        }
+        if (s.isDirectory()) await processBookDir(p, e, authorName, authorPath);
+      }
+    } finally {
+      ctx.currentSeries = prev;
+    }
+  }
+
+  async function processLooseAudioInSeries(filePath, filename, seriesName, authorName, authorPath) {
+    const name = path.basename(filename, path.extname(filename));
+    const tags = await readTags(filePath);
+    const bookTitle = tags.album || name;
+    addLookup({
+      filename, method: 'id3-tags',
+      result: `${authorName} / ${seriesName} / ${bookTitle}`,
+      confidence: tags.album ? 'high' : 'medium',
+      notes: `Loose audio inside series container; album="${tags.album || '(not set)'}"`,
+    });
+    addMove(filePath, path.join(authorPath, seriesName, bookTitle, filename),
+      `loose audio → ${authorName}/${seriesName}/${bookTitle}/`);
   }
 
   async function processLooseAudio(filePath, filename, authorName, authorPath) {
