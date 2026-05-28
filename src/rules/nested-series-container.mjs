@@ -62,6 +62,7 @@ export default class NestedSeriesContainerRule extends ScanRule {
     const noTagFiles = [];
     for (const leaf of mixedLeaves) {
       for (const { file, tags } of leaf.files) {
+        if (ctx.recordSourceMeta) ctx.recordSourceMeta(file, tags);
         const album = tags.album?.trim();
         if (!album) { noTagFiles.push({ file, tags }); continue; }
         const key = album.toLowerCase();
@@ -112,8 +113,8 @@ export default class NestedSeriesContainerRule extends ScanRule {
       }
 
       const destFolder = destSeries
-        ? path.join(authorPath, destSeries, seqStr + group.album)
-        : path.join(authorPath, seqStr + group.album);
+        ? ctx.destPath(authorName, destSeries, seqStr + group.album)
+        : ctx.destPath(authorName, seqStr + group.album);
       const destLabel = destSeries
         ? `${destSeries}/${seqStr}${group.album}/`
         : `${seqStr}${group.album}/`;
@@ -145,7 +146,7 @@ export default class NestedSeriesContainerRule extends ScanRule {
 
     for (const { file } of noTagFiles) {
       const filename = path.basename(file);
-      const fallback = path.join(authorPath, '_NeedsReview', filename);
+      const fallback = ctx.destPath(authorName, '_NeedsReview', filename);
       if (file === fallback) continue;
       ctx.addBestGuess(
         file,

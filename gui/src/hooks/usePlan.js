@@ -120,6 +120,38 @@ async function fetchSeriesSuggest({ title, author }) {
   return res.json();
 }
 
+async function fetchConflictMeta(index) {
+  const res = await fetch(`/api/conflict-meta/${index}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function resolveConflict({ index, keep }) {
+  const res = await fetch(`/api/conflicts/${index}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keep }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function undoConflict(index) {
+  const res = await fetch(`/api/conflicts/${index}/resolution`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function startIngest({ ingestionFolder, libraryRoot }) {
+  const res = await fetch('/api/run/ingest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ingestionFolder, libraryRoot }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 export function usePlan() {
   return useQuery({ queryKey: PLAN_KEY, queryFn: fetchPlan });
 }
@@ -141,6 +173,9 @@ export function useDismissDuplicate()        { return useMutationWithRefresh(dis
 export function useResolveGroupDuplicate()   { return useMutationWithRefresh(resolveGroupDuplicate); }
 export function useUndoGroupDuplicate()      { return useMutationWithRefresh(undoGroupDuplicate); }
 export function useDismissGroupDuplicate()   { return useMutationWithRefresh(dismissGroupDuplicate); }
+export function useResolveConflict()         { return useMutationWithRefresh(resolveConflict); }
+export function useUndoConflict()            { return useMutationWithRefresh(undoConflict); }
+export function useStartIngest()             { return useMutation({ mutationFn: startIngest }); }
 export function useUpdateSettings()          { return useMutationWithRefresh(updateSettings); }
 export function useSeriesSuggest()           { return useMutation({ mutationFn: fetchSeriesSuggest }); }
 
@@ -158,6 +193,15 @@ export function useGroupDupMeta(index, enabled) {
   return useQuery({
     queryKey: ['group-dup-meta', index],
     queryFn: () => fetchGroupDupMeta(index),
+    enabled,
+    staleTime: Infinity,
+  });
+}
+
+export function useConflictMeta(index, enabled) {
+  return useQuery({
+    queryKey: ['conflict-meta', index],
+    queryFn: () => fetchConflictMeta(index),
     enabled,
     staleTime: Infinity,
   });

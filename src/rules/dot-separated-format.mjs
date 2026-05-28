@@ -26,7 +26,7 @@ export default class DotSeparatedFormatRule extends ScanRule {
     if (!ctx.hasAudioRecursive(bookPath)) return true;
 
     const { series, num, title } = parsed;
-    const seriesDir = path.join(ctx.root, authorName, series);
+    const seriesDir = ctx.destPath(authorName, series);
     const dest = path.join(seriesDir, `${num} - ${title}`);
 
     if (ctx.isDoubleNested(bookPath)) {

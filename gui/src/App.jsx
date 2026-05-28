@@ -5,6 +5,7 @@ import PlanStats from './components/PlanStats.jsx';
 import PlanSection from './components/PlanSection.jsx';
 import DuplicateCard from './components/DuplicateCard.jsx';
 import GroupDuplicateCard from './components/GroupDuplicateCard.jsx';
+import ConflictCard from './components/ConflictCard.jsx';
 import BatchToolbar from './components/BatchToolbar.jsx';
 import RunControls from './components/RunControls.jsx';
 
@@ -81,9 +82,12 @@ export default function App() {
 
   const root              = inferRoot(plan);
   const duplicatesFolder  = plan.settings?.duplicatesFolder || null;
+  const sourceRoot        = plan.settings?.sourceRoot || null;
+  const libraryRoot       = plan.settings?.destRoot   || root;
   const items             = plan.items || [];
   const duplicates        = plan.duplicates || [];
   const groupDuplicates   = plan.groupDuplicates || [];
+  const conflicts         = plan.conflicts || [];
 
   const bestGuess     = items.filter(i => i.bestGuess);
   const confirmed     = items.filter(i => !i.bestGuess && !i.junk);
@@ -95,6 +99,29 @@ export default function App() {
       <RunControls initialRoot={root} />
 
       <main style={{ maxWidth: 1600, margin: '0 auto', padding: '20px 24px 80px' }}>
+
+        {conflicts.length > 0 && (
+          <section className="surface" style={{ marginBottom: 16, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--color-border)', fontWeight: 600, fontSize: 14 }}>
+              Ingestion Conflicts
+              <span style={{ color: 'var(--color-muted)', fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+                (book already exists in library — {conflicts.length})
+              </span>
+            </div>
+            <div style={{ padding: 16 }}>
+              {conflicts.map((cf, i) => (
+                <ConflictCard
+                  key={i}
+                  conflict={cf}
+                  index={i}
+                  sourceRoot={sourceRoot}
+                  libraryRoot={libraryRoot}
+                  duplicatesFolder={duplicatesFolder}
+                />
+              ))}
+            </div>
+          </section>
+        )}
 
         {bestGuess.length > 0 && (
           <PlanSection
@@ -164,7 +191,7 @@ export default function App() {
           </section>
         )}
 
-        {items.length === 0 && duplicates.length === 0 && groupDuplicates.length === 0 && (
+        {items.length === 0 && duplicates.length === 0 && groupDuplicates.length === 0 && conflicts.length === 0 && (
           <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--color-muted)' }}>
             <div style={{ fontSize: 16 }}>No items in plan</div>
             <div style={{ fontSize: 13, marginTop: 8 }}>Run the dry-run scan first: <code>node reorganize.mjs --root /path</code></div>

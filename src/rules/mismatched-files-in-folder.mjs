@@ -37,6 +37,8 @@ export default class MismatchedFilesInFolderRule extends ScanRule {
     );
 
     const classified = audioFiles.map((f, i) => {
+      const filePath = path.join(bookPath, f);
+      if (ctx.recordSourceMeta) ctx.recordSourceMeta(filePath, tags[i]);
       const album = tags[i].album;
       const artist = tags[i].artist;
       const matches = album ? albumsMatch(bookName, album) : true; // no tag = assume ok
@@ -103,8 +105,8 @@ export default class MismatchedFilesInFolderRule extends ScanRule {
       // Inside a detected series container, keep the file under that series
       // (preserves Author/Series/Book structure). Otherwise route by artist.
       const destBase = ctx.currentSeries
-        ? path.join(authorPath, ctx.currentSeries)
-        : path.join(ctx.root, effectiveAuthor);
+        ? ctx.destPath(authorName, ctx.currentSeries)
+        : ctx.destPath(effectiveAuthor);
       const destLabel = ctx.currentSeries
         ? `${authorName}/${ctx.currentSeries}/${destBookFolder}/`
         : `${effectiveAuthor}/${destBookFolder}/`;
@@ -117,7 +119,7 @@ export default class MismatchedFilesInFolderRule extends ScanRule {
         ctx.addBestGuess(
           filePath,
           null,
-          path.join(ctx.root, '_NeedsReview', filename),
+          ctx.destPath('_NeedsReview', filename),
           `mismatched file in "${bookName}" — no album tag`,
           `File "${filename}" has no album tag; cannot determine correct destination`
         );

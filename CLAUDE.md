@@ -13,9 +13,10 @@ Modular Node.js ESM project. Thin entry-point wrappers delegate to `src/`:
 - `reorganize.mjs` → `src/cli.mjs` → `src/core/scanner.mjs` | `src/core/executor.mjs`
 - `gui.mjs` → `src/gui-server.mjs` (Express API + SSE process runner)
 
-Two top-level modes controlled by `--execute`:
-- **Dry-run**: three-pass scan → rules engine → builds in-memory plan state → writes `plan.json` + `REORGANIZATION_GLOSSARY.md`
-- **Execute**: reads `plan.json`, processes each item, writes status back after every item (for restartability)
+Three top-level modes:
+- **Dry-run** (default): three-pass scan of `--root` → rules engine → builds in-memory plan state → writes `plan.json` + `REORGANIZATION_GLOSSARY.md`
+- **Ingest dry-run** (`--ingest <path>`): scans the ingest folder as the source, plans moves into `--root` (the library); detects books that already exist in the library and surfaces them as **conflicts** instead of moves
+- **Execute** (`--execute`): reads `plan.json`, processes each item, writes status back after every item (for restartability)
 
 ### Path Resolution (`src/cli.mjs`)
 
@@ -28,13 +29,47 @@ const ignoreFile = opts.ignoreFile ?? path.join(root, '.audiobooksignore');
 
 ### Three-Pass Scan (`src/core/scanner.mjs`)
 
-`runDryScan` loads rules from `src/rules/` at startup, then runs three passes:
+`runDryScan(root, { destRoot, ... })` loads rules from `src/rules/` at startup, then runs three passes:
 
-1. **Pass 1 — Root files**: classifies each file at the library root. Audio → ID3 tags + metadata provider cascade fallback. Junk/system → DELETE.
+1. **Pass 1 — Root files**: classifies each file at the scan root. Audio → ID3 tags + metadata provider cascade fallback. Junk/system → DELETE.
 2. **Pass 2 — Top-level dirs**: hard-skip → ignore rules → `user-mappings.json` check → audio-at-root check → `processAuthorDir`.
-3. **Pass 3 — Empty dirs**: `scanForEmptyDirs` walks the full tree, marks dirs with no audio → DELETE.
+3. **Pass 3 — Empty dirs**: `scanForEmptyDirs` walks the full tree, marks dirs with no audio → DELETE. **Skipped in ingest mode** — an emptied ingest folder is the desired state, not junk-cleanup material.
 
 All classifier functions are closures inside `runDryScan` sharing `planState` from `createPlanState()`. A `RuleContext` object (built once per scan) is passed to every rule hook — rules never import scanner internals directly.
+
+### Source vs. Destination Root
+
+`runDryScan(root, opts)` accepts an optional `opts.destRoot` (defaults to `root`). The scanner walks `root` (the scan source) but constructs destinations under `destRoot` (the library). In normal mode the two are identical and behavior is byte-identical with prior versions. In ingest mode they differ:
+- `root` = ingestion folder (scanned for new books)
+- `destRoot` = existing library (target of moves)
+
+`ctx.destPath(...segments)` is `path.join(destRoot, ...segments)` — rules use it instead of `path.join(authorPath, ...)` for destinations. The `authorPath` parameter passed to rule hooks is still the source author path (used for reading source contents); only destination construction goes through `destPath`.
+
+### Ingest Mode (`destRoot !== root`)
+
+Triggered by `--ingest <path>` on the CLI (or `POST /api/run/ingest` in the GUI). On scan start:
+
+1. **Library index build** (`src/core/library-index.mjs`): BFS the library, sample one audio file per audio-bearing leaf directory, build `{ byPath: Set, byContent: Map<"artist|album", [dir, ...]> }` with concurrency-8 reads. Status logged: `[ingest] Indexed N unique books in M.Ms`.
+2. **Source-meta recording**: classifier helpers and rules call `ctx.recordSourceMeta(sourcePath, { artist, album })` whenever they read ID3 tags. The map is consulted synchronously by the conflict-check wrapper.
+3. **addMove/addBestGuess wrapper**: replaces the plan-state mutators. Each call runs `ctx.checkConflict(source, dest)`:
+   - `statOf(dest)` exists → `{ matchType: 'path', libraryFile: dest }`
+   - Source meta matches `libraryIndex.byContent` → `{ matchType: 'content', libraryFile: hits[0] }`
+   - Otherwise → null, and the move proceeds normally.
+
+   When a conflict is detected, the wrapper diverts the call to `addConflict(...)` and **the move is suppressed**. The user must resolve in the GUI before the move appears in `items`.
+4. **Plan settings**: `plan.settings.sourceRoot` and `plan.settings.destRoot` are persisted so the executor and GUI know both roots even on later invocations.
+
+The library index is in-memory only (not cached to disk); rebuilt every scan.
+
+### Conflict Resolution
+
+A conflict has three possible resolutions, all PATCHed via `/api/conflicts/:index` with `{ keep: 'new' | 'existing' | 'dismiss' }`:
+
+- **`new`** — replace the library copy with the ingested one. Synthesizes two items: `CF${idx}_evict` (sideline existing library file; move to `plan.settings.duplicatesFolder` if set, else delete with `junk:true`) and `CF${idx}_move` (ingested → dest).
+- **`existing`** — keep the library copy. No synthesized items; ingestion source stays where it is (no SKIP item; absence-of-move IS the skip).
+- **`dismiss`** — false positive. Synthesizes the original `CF${idx}_move` as if no conflict existed.
+
+`DELETE /api/conflicts/:index/resolution` clears any prior resolution and removes all `CF${idx}_*` items.
 
 ### Plan Item Shape
 
@@ -86,6 +121,26 @@ Resolving a pairwise duplicate synthesizes a `DUP${index}` plan item. Resolving 
 
 A duplicate can also be **dismissed** as a false positive (`dup.dismissed = true` / `gd.dismissed = true`). Dismissal clears any prior resolution + synthesized items and produces no plan items — both files stay in place. The `DELETE /api/{duplicates,group-duplicates}/:index/resolution` endpoint clears both `resolution` and `dismissed`.
 
+### Conflict Record Shape (ingest mode)
+
+```javascript
+{
+  source,             // absolute path in ingestion folder
+  dest,               // absolute path in library (where the move would have gone)
+  libraryFile,        // absolute path of the existing library item (file or dir)
+  matchType: 'path' | 'content',
+  intendedReason,     // reason the suppressed move would have had
+  intendedNotes,
+  sourceMeta,         // { artist, album, title, year, bitrate, duration, codec, size } | null
+  libraryMeta,        // same shape | null — populated lazily by GET /api/conflict-meta/:index
+  recommendation: 'new' | 'existing' | null,
+  resolution,         // { keep: 'new'|'existing', resolvedAt } | null
+  dismissed: bool,    // true when user marked false-positive
+}
+```
+
+Resolving a conflict synthesizes plan items prefixed `CF${idx}_` (`_evict` and/or `_move`). Dismissing synthesizes only the `_move` item. The conflict object stays in `plan.conflicts` for audit; the items list drives execute.
+
 ### HARD_SKIP
 
 ```javascript
@@ -113,7 +168,13 @@ export class ScanRule {
 
 ### RuleContext
 
-Passed to every hook. Contains: `addMove`, `addJunkMove`, `addJunkDelete`, `addBestGuess`, `addSkip`, `addDuplicate`, `addGroupDuplicate`, `addLookup` (plan mutators); `root`, `relPath`, `checkIgnore`; `listDir`, `statOf`, `isAudio`, `isSystemFile`, `isJunkFile`, `hasAudioRecursive`, `isDoubleNested`; `readTags`, `recommendDuplicate`, `searchOpenLibrary` (legacy); `resolveMetadata({ title, author, duration })` → `ResolverResult | null`; `scanBookForJunk`.
+Passed to every hook. Contains:
+- **Plan mutators**: `addMove`, `addJunkMove`, `addJunkDelete`, `addBestGuess`, `addSkip`, `addDuplicate`, `addGroupDuplicate`, `addLookup`. In ingest mode, `addMove` and `addBestGuess` are wrapped to divert path/content collisions to the conflicts list.
+- **Roots**: `root` (scan source — what to walk), `destRoot` (library — where destinations live; equals `root` in normal mode), `destPath(...segs)` = `path.join(destRoot, ...segs)`. **Rules must use `ctx.destPath(authorName, …)` for destination construction**, never `path.join(authorPath, …)` — `authorPath` is the source-side directory and only equals the destination author dir in normal mode.
+- **Ingest helpers**: `recordSourceMeta(path, { artist, album })` — records ID3 metadata for the synchronous conflict check. Rules that read tags should call this so content-match conflicts trigger correctly.
+- **Filesystem helpers**: `relPath`, `checkIgnore`, `listDir`, `statOf`, `isAudio`, `isSystemFile`, `isJunkFile`, `hasAudioRecursive`, `isDoubleNested`.
+- **Metadata helpers**: `readTags`, `recommendDuplicate`, `searchOpenLibrary` (legacy), `resolveMetadata({ title, author, duration })` → `ResolverResult | null`.
+- **Misc**: `scanBookForJunk`, `currentSeries`, `seriesContainers`.
 
 ### Built-in Rules (priority order)
 
@@ -200,9 +261,17 @@ Exports: `HARD_SKIP`, `NON_AUDIOBOOK_DIRS`, `AUDIO_EXTS`, `JUNK_EXTS`, `SYSTEM_N
 
 **`isSystemFile(name)`** — true for `SYSTEM_NAMES` members or `name.startsWith('._')`. The `._` prefix is Mac AppleDouble; always junk regardless of extension.
 
-**`safeMove(src, dest, root)`** — three cases: parent→child (EINVAL shuffle via sibling temp), same filesystem (atomic rename), cross-filesystem (EXDEV: copyTree + verifyTree + removeTree).
+**`safeMove(src, dest, root)`** — three cases: parent→child (EINVAL shuffle via sibling temp), same filesystem (atomic rename), cross-filesystem (EXDEV: copyTree + verifyTree + removeTree). `root` may be a string OR an array of allowed roots (ingest mode passes `[libraryRoot, sourceRoot]`).
 
-**`deleteItem(p, root, forceDeleteAudioJunk)`** — safety checks: must be inside root, `._*` bypasses audio check, audio extension throws unless `forceDeleteAudioJunk` set.
+**`deleteItem(p, root, forceDeleteAudioJunk)`** — safety checks: target must live underneath at least one allowed root, `._*` bypasses audio check, audio extension throws unless `forceDeleteAudioJunk` set. `root` accepts string or array.
+
+**`removeTree(p, root)`** — same string-or-array convention; safety check is the same `withinRoots(p, root)` helper.
+
+### `src/core/library-index.mjs`
+
+**`buildLibraryIndex(destRoot, { concurrency = 8 })`** → `{ byPath: Set<string>, byContent: Map<"artist|album", string[]> }`.
+
+Used only in ingest mode. BFS `destRoot` skipping `HARD_SKIP`, `NON_AUDIOBOOK_DIRS`, `_NeedsReview`, `_misc`, `_non-audiobook`, and dotfiles. For each audio-bearing leaf directory (one with audio files at its own root level), samples the first audio file (sorted by name) and reads its ID3 tags via `readTags(file, false)`. Keys are `${artist}|${album}` lowercased and trimmed; entries with both fields empty are dropped. Concurrency-bounded by a small inline semaphore. No on-disk caching for v1.
 
 ### `src/core/metadata.mjs`
 
@@ -220,7 +289,9 @@ Exports: `HARD_SKIP`, `NON_AUDIOBOOK_DIRS`, `AUDIO_EXTS`, `JUNK_EXTS`, `SYSTEM_N
 
 **`addGroupDuplicate(groupA, groupB, note, opts)`** — each group: `{ files, totalSize, description }`. Resolution synthesized by `gui-server.mjs`.
 
-**`buildPlanOutput({ ..., settings })`** — includes `settings` (e.g. `{ duplicatesFolder }`) in the written plan. Scanner passes it through from CLI options or leaves it `{}`.
+**`addConflict({ source, dest, reason, notes, matchType, libraryFile, sourceMeta?, libraryMeta?, recommendation? })`** — ingest-mode only. Used by the scanner wrapper around `addMove`/`addBestGuess` when a destination collides with the library. The original move is **suppressed**; user resolves in the GUI to synthesize the actual `CF*` items.
+
+**`buildPlanOutput({ ..., settings })`** — includes `settings` and the new `conflicts` array. Settings keys: `duplicatesFolder` (always optional); `sourceRoot` + `destRoot` (ingest mode only — persist both roots so executor/GUI know the ingest mapping even on later invocations).
 
 **`writePlan(planFile, plan)`** — atomic write via `.tmp` + rename.
 
@@ -252,7 +323,11 @@ Scanner calls it via `metadataResolver.resolve()`; rules call it via `ctx.resolv
 
 ### `src/core/executor.mjs`
 
-Processes `pending`, `approved`, and optionally `failed` items. Writes `writePlan` after every item. Synthesized `DUP*` and `GD*` items are processed as follows:
+`runExecute(planFile, executeLog, root, { sourceRoot, ... })` processes `pending`, `approved`, and optionally `failed` items. Writes `writePlan` after every item.
+
+`sourceRoot` defaults to `plan.settings.sourceRoot` when not passed explicitly. When `sourceRoot` differs from `root` (ingest mode), the executor builds `allowedRoots = [root, sourceRoot]` and passes it to all `safeMove`/`deleteItem` calls so sources outside the library can be moved/removed safely.
+
+Synthesized `DUP*`, `GD*`, and `CF*` items are processed as follows:
 - `action: 'delete'` (`junk: true`) — deleted only when `--delete-junk` is passed
 - `action: 'move'` (`junk: false`) — moved to `dest` automatically without any extra flag
 
@@ -260,9 +335,22 @@ Processes `pending`, `approved`, and optionally `failed` items. Writes `writePla
 
 Express 5. SPA fallback uses `/{*splat}` (named wildcard — Express 5 / path-to-regexp v8 requirement).
 
-Key endpoints: `PATCH /api/settings` (updates `plan.settings`; currently only `duplicatesFolder`), `PATCH /api/duplicates/:index` (synthesizes `DUP${idx}`), `PATCH /api/group-duplicates/:index` (synthesizes `GD${idx}_*`), `DELETE /api/*/resolution` (removes synthesized items + clears resolution), `/api/fs/ls` (scoped to ROOT).
+Key endpoints:
+- `PATCH /api/settings` (updates `plan.settings`; whitelisted keys: `duplicatesFolder`, `sourceRoot`, `destRoot`)
+- `PATCH /api/duplicates/:index` (synthesizes `DUP${idx}`)
+- `PATCH /api/group-duplicates/:index` (synthesizes `GD${idx}_*`)
+- `PATCH /api/conflicts/:index` (ingest mode — synthesizes `CF${idx}_*`; body `{ keep: 'new'|'existing'|'dismiss' }`)
+- `GET /api/conflict-meta/:index` (lazy-loads `sourceMeta` and `libraryMeta` via `readTags(..., true)` + `recommendDuplicate`; for directories, samples the first audio file)
+- `DELETE /api/*/resolution` (removes synthesized items + clears resolution)
+- `POST /api/run/ingest` (body `{ ingestionFolder, libraryRoot }`; spawns `reorganize.mjs --root <libraryRoot> --ingest <ingestionFolder>` via the shared `spawnRun('ingest', ...)` machinery)
+- `POST /api/run/execute` — when `plan.settings.sourceRoot` is present, automatically appends `--ingest <sourceRoot>` so the executor sees both roots
+- `/api/fs/ls` (scoped: ROOT plus `plan.settings.sourceRoot` and `plan.settings.destRoot` if present)
+
+`getRoot()` priority: `plan.settings.destRoot` → `plan.ignoreFile` parent → `plan.root` → server `--root` flag. The destRoot-first priority means ingest plans correctly treat the library (not the ingest source) as ROOT.
 
 Duplicate resolution synthesis: if `plan.settings.duplicatesFolder` is set, the synthesized item uses `action: 'move'` with `dest = path.join(duplicatesFolder, path.relative(ROOT, discardFile))` and `junk: false`. Otherwise `action: 'delete'`, `dest: null`, `junk: true`.
+
+Conflict resolution synthesis (`keep: 'new'`): same `duplicatesFolder` logic — when set, the existing library file's eviction is `action: 'move'` (lands in dup folder); otherwise `action: 'delete'` + `junk: true`. A second `CF${idx}_move` item is always synthesized to bring the ingested copy into the library.
 
 Allowed PATCH fields for items: `status` (pending/approved/skipped only), `dest`, `bestGuess`, `fallbackDest`. `done` and `failed` are read-only.
 
@@ -276,9 +364,19 @@ Vite 6 + React 19 + Tailwind CSS v4. Separate package with its own `node_modules
 
 **`GroupDuplicateCard.jsx`** — combined file vs. chapters comparison. Expandable file list for the chapter side. Resolution adds items via `PATCH /api/group-duplicates/:index`. Accepts `duplicatesFolder` prop for the same move/delete labelling.
 
+**`ConflictCard.jsx`** (ingest mode) — modeled on `DuplicateCard.jsx`. Props: `conflict`, `index`, `sourceRoot`, `libraryRoot`, `duplicatesFolder`. Two columns labeled "Ingested (new)" / "In Library (existing)". Buttons: **Keep New** (replace library copy), **Keep Existing** (ingestion source stays put), **Not a conflict** (dismiss → move proceeds), and **Undo** post-resolution. Lazy-loads metadata via `/api/conflict-meta/:index`. Rendered from `plan.conflicts[]` in a dedicated section at the top of `App.jsx` (above Best Guesses) because conflicts block execution of the corresponding move.
+
 **`PlanSection.jsx`** — groups items by first 2 path segments relative to ROOT. Per-group and global Approve All / Skip All.
 
-**`RunControls.jsx`** — SSE via `EventSource('/api/run/stream')`; replays buffered output for new connections. Options panel includes a "Duplicates folder" text input that saves to `plan.settings` via `PATCH /api/settings`; blank = delete mode.
+**`RunControls.jsx`** — SSE via `EventSource('/api/run/stream')`; replays buffered output for new connections.
+- **Library root** input row (always visible): destination of moves.
+- **Ingest from** input row (optional): when non-empty, the "Dry Run" button label flips to "Ingest (Dry Run)" and POSTs to `/api/run/ingest` with `{ ingestionFolder, libraryRoot }`. Blank = normal library scan.
+- Options panel: "Duplicates folder" text input persists to `plan.settings` via `PATCH /api/settings`; blank = delete mode.
+- The ingestion-folder field is prefilled from `plan.settings.sourceRoot` on subsequent sessions.
+
+**`PlanStats.jsx`** — header strip; shows "conflicts unresolved" count alongside duplicates/best-guess/skipped counts.
+
+**`usePlan.js`** — React Query hooks. Conflict-related: `useResolveConflict`, `useUndoConflict`, `useConflictMeta`, `useStartIngest`.
 
 ---
 

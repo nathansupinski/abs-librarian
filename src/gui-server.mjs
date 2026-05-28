@@ -71,6 +71,8 @@ export function startServer(argv) {
     if (statOf(PLAN_FILE)) {
       try {
         const p = readPlan(PLAN_FILE);
+        // Ingest-mode plans: ROOT is the library (destRoot), not the scanned dir.
+        if (p.settings?.destRoot) return p.settings.destRoot;
         if (p.ignoreFile) return path.dirname(p.ignoreFile);
         if (p.root)       return p.root;
       } catch { /* fall through */ }
@@ -183,7 +185,7 @@ export function startServer(argv) {
   app.patch('/api/settings', (req, res) => {
     try {
       const plan = readPlan(PLAN_FILE);
-      const allowed = new Set(['duplicatesFolder']);
+      const allowed = new Set(['duplicatesFolder', 'sourceRoot', 'destRoot']);
       plan.settings = plan.settings || {};
       for (const [k, v] of Object.entries(req.body)) {
         if (!allowed.has(k)) continue;
@@ -363,14 +365,144 @@ export function startServer(argv) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ---- Conflicts (ingest mode) ------------------------------------------
+
+  app.patch('/api/conflicts/:index', (req, res) => {
+    try {
+      const plan = readPlan(PLAN_FILE);
+      const idx = parseInt(req.params.index, 10);
+      const cf = (plan.conflicts || [])[idx];
+      if (!cf) return res.status(404).json({ error: 'Conflict not found' });
+
+      // Always clear any prior synthesized items + resolution first.
+      plan.items = plan.items.filter(i => !i.id?.startsWith(`CF${idx}_`));
+      delete cf.resolution;
+      delete cf.dismissed;
+
+      const { keep } = req.body || {};
+      const ts = new Date().toISOString();
+      const dupFolder   = plan.settings?.duplicatesFolder;
+      const libraryRoot = plan.settings?.destRoot;
+      const sourceIsDir = !!statOf(cf.source)?.isDirectory();
+      const moveType    = sourceIsDir ? 'MOVE_DIR' : 'MOVE_FILE';
+
+      if (keep === 'dismiss') {
+        cf.dismissed = true;
+        plan.items.push({
+          id: `CF${idx}_move`,
+          type: moveType,
+          source: cf.source, dest: cf.dest,
+          reason: cf.intendedReason || 'ingestion move (conflict dismissed)',
+          notes: `${cf.intendedNotes || ''} [dismissed conflict]`.trim(),
+          status: 'pending',
+          junk: false, action: 'move', bestGuess: false,
+        });
+      } else if (keep === 'new') {
+        cf.resolution = { keep: 'new', resolvedAt: ts };
+        // 1) Evict the existing library file: move to dup folder if configured,
+        //    otherwise mark as junk-delete (requires --delete-junk).
+        const evictAction = dupFolder && libraryRoot ? 'move' : 'delete';
+        const evictDest   = evictAction === 'move'
+          ? path.join(dupFolder, path.relative(libraryRoot, cf.libraryFile))
+          : null;
+        const evictType   = statOf(cf.libraryFile)?.isDirectory() ? 'MOVE_DIR' : 'MOVE_FILE';
+        plan.items.push({
+          id: `CF${idx}_evict`,
+          type: evictType,
+          source: cf.libraryFile,
+          dest: evictDest,
+          reason: 'conflict: evicting existing library copy in favor of ingested copy',
+          notes: `Resolved via GUI on ${ts}`,
+          status: 'pending',
+          junk: evictAction === 'delete', action: evictAction, bestGuess: false,
+        });
+        // 2) Move the new (ingested) file into the library destination.
+        plan.items.push({
+          id: `CF${idx}_move`,
+          type: moveType,
+          source: cf.source, dest: cf.dest,
+          reason: cf.intendedReason || 'ingestion move (keeping new)',
+          notes: `Resolved via GUI on ${ts} — replaces ${cf.libraryFile}`,
+          status: 'pending',
+          junk: false, action: 'move', bestGuess: false,
+        });
+      } else if (keep === 'existing') {
+        cf.resolution = { keep: 'existing', resolvedAt: ts };
+        // No synthesized items: ingestion source stays in place, library unchanged.
+      } else {
+        return res.status(400).json({ error: 'keep must be "new", "existing", or "dismiss"' });
+      }
+
+      writePlan(PLAN_FILE, plan);
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.delete('/api/conflicts/:index/resolution', (req, res) => {
+    try {
+      const plan = readPlan(PLAN_FILE);
+      const idx = parseInt(req.params.index, 10);
+      const cf = (plan.conflicts || [])[idx];
+      if (!cf) return res.status(404).json({ error: 'Conflict not found' });
+      delete cf.resolution;
+      delete cf.dismissed;
+      plan.items = plan.items.filter(i => !i.id?.startsWith(`CF${idx}_`));
+      writePlan(PLAN_FILE, plan);
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.get('/api/conflict-meta/:index', async (req, res) => {
+    try {
+      const plan = readPlan(PLAN_FILE);
+      const idx = parseInt(req.params.index, 10);
+      const cf = (plan.conflicts || [])[idx];
+      if (!cf) return res.status(404).json({ error: 'Conflict not found' });
+
+      const pickAudio = (p) => {
+        const s = statOf(p);
+        if (!s) return null;
+        if (s.isFile()) return p;
+        const entries = listDir(p).sort();
+        const af = entries.find(n => !n.startsWith('.') && !n.startsWith('._') && /\.(mp3|m4a|m4b|flac|ogg|opus|wav|aac)$/i.test(n));
+        return af ? path.join(p, af) : null;
+      };
+      const srcSample = pickAudio(cf.source);
+      const libSample = pickAudio(cf.libraryFile);
+
+      const [m1, m2] = await Promise.all([
+        srcSample ? readTags(srcSample, true) : Promise.resolve({}),
+        libSample ? readTags(libSample, true) : Promise.resolve({}),
+      ]);
+      const [s1, s2] = [srcSample ? statOf(srcSample) : null, libSample ? statOf(libSample) : null];
+      const sourceMeta  = { ...m1, size: s1?.size ?? null };
+      const libraryMeta = { ...m2, size: s2?.size ?? null };
+      // recommendDuplicate returns 'f1'/'f2'; map onto 'new'/'existing'.
+      const rec = recommendDuplicate(m1, m2, s1, s2);
+      const recommendation = rec === 'f1' ? 'new' : rec === 'f2' ? 'existing' : null;
+      res.json({ sourceMeta, libraryMeta, recommendation });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // ---- Filesystem listing -----------------------------------------------
+
   app.get('/api/fs/ls', (req, res) => {
     try {
       const reqPath = req.query.path;
       if (!reqPath) return res.status(400).json({ error: 'path query param required' });
 
-      // Safety: only allow browsing within ROOT
-      if (ROOT && !path.resolve(reqPath).startsWith(ROOT)) {
-        return res.status(403).json({ error: 'Path outside ROOT' });
+      // Safety: allow browsing within ROOT, plus the ingest-mode source/dest
+      // if a plan exists. Falsy entries are filtered out.
+      let planSettings = null;
+      try { planSettings = readPlan(PLAN_FILE)?.settings || null; } catch { /* no plan yet */ }
+      const allowedRoots = [
+        ROOT,
+        planSettings?.sourceRoot,
+        planSettings?.destRoot,
+      ].filter(Boolean);
+      const resolved = path.resolve(reqPath);
+      if (allowedRoots.length > 0 && !allowedRoots.some(r => resolved === r || resolved.startsWith(r + path.sep))) {
+        return res.status(403).json({ error: 'Path outside allowed roots' });
       }
 
       const entries = listDir(reqPath)
@@ -439,10 +571,15 @@ export function startServer(argv) {
     if (currentRun) return res.status(409).json({ error: 'A run is already in progress' });
     try {
       const plan = readPlan(PLAN_FILE);
-      const root = plan.ignoreFile ? path.dirname(plan.ignoreFile) : getRoot();
+      // In ingest mode, the library root lives in plan.settings.destRoot.
+      // Otherwise infer from ignoreFile or fall back to server ROOT.
+      const root = plan.settings?.destRoot
+        ? plan.settings.destRoot
+        : (plan.ignoreFile ? path.dirname(plan.ignoreFile) : getRoot());
       if (!root) return res.status(400).json({ error: 'Cannot determine ROOT from plan.json' });
       const { flags = {} } = req.body || {};
       const args = ['--root', root, '--execute'];
+      if (plan.settings?.sourceRoot)  args.push('--ingest', plan.settings.sourceRoot);
       if (plan.ignoreFile)            args.push('--ignore-file', plan.ignoreFile);
       if (flags.autoAcceptReview)     args.push('--auto-accept-review');
       if (flags.deleteJunk)           args.push('--delete-junk');
@@ -450,6 +587,22 @@ export function startServer(argv) {
       if (flags.retryFailed)          args.push('--retry-failed');
       if (flags.forceDeleteAudioJunk) args.push('--force-delete-audio-junk');
       spawnRun('execute', REORG_SCRIPT, args);
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post('/api/run/ingest', (req, res) => {
+    if (currentRun) return res.status(409).json({ error: 'A run is already in progress' });
+    try {
+      const { ingestionFolder, libraryRoot } = req.body || {};
+      if (!ingestionFolder || !libraryRoot)
+        return res.status(400).json({ error: 'ingestionFolder and libraryRoot are required' });
+      const ingest = path.resolve(ingestionFolder);
+      const lib    = path.resolve(libraryRoot);
+      if (ingest === lib)
+        return res.status(400).json({ error: 'ingestionFolder and libraryRoot must differ' });
+      const args = ['--root', lib, '--ingest', ingest];
+      spawnRun('ingest', REORG_SCRIPT, args);
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });

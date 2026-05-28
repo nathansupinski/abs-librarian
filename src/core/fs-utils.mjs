@@ -48,8 +48,15 @@ export function verifyTree(src, dest) {
   }
 }
 
+// root may be a string or an array of allowed root prefixes. The target path
+// must live underneath at least one of them.
+function withinRoots(p, root) {
+  const roots = Array.isArray(root) ? root : [root];
+  return roots.some(r => r && (p === r || p.startsWith(r + path.sep)));
+}
+
 export function removeTree(p, root) {
-  if (!p.startsWith(root + '/')) throw new Error(`Safety: will not remove outside ROOT: ${p}`);
+  if (!withinRoots(p, root)) throw new Error(`Safety: will not remove outside ROOT: ${p}`);
   const s = statOf(p);
   if (!s) return;
   if (s.isDirectory()) {
@@ -93,7 +100,7 @@ export function safeMove(src, dest, root) {
 }
 
 export function deleteItem(p, root, forceDeleteAudioJunk = false) {
-  if (!p.startsWith(root + '/')) throw new Error(`Safety: will not delete outside ROOT: ${p}`);
+  if (!withinRoots(p, root)) throw new Error(`Safety: will not delete outside ROOT: ${p}`);
   const base = path.basename(p);
   const isMacResourceFork = base.startsWith('._');
   if (!isMacResourceFork && isAudio(base) && !forceDeleteAudioJunk)

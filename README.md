@@ -48,6 +48,26 @@ node reorganize.mjs          # dry-run
 node reorganize.mjs --execute
 ```
 
+### Ingest mode — moving new books into an existing library
+
+If you keep new arrivals in a staging folder and want to merge them into your library, use `--ingest`:
+
+```bash
+# 1. Scan the staging folder; plan moves into the library
+node reorganize.mjs --root /path/to/Audiobooks --ingest /path/to/Incoming
+
+# 2. Review the plan (the GUI shows an "Ingestion Conflicts" section for
+#    books that already exist in the library — path collision or matching
+#    ID3 artist+album)
+
+# 3. Execute (same command as normal — sourceRoot is read from plan.json)
+node reorganize.mjs --root /path/to/Audiobooks --execute
+```
+
+Conflicts are resolved in the GUI: **Keep New** (replace library copy; the old file moves to your duplicates folder if set, else deletes with `--delete-junk`), **Keep Existing** (ingested file stays where it is), or **Not a conflict** (perform the move anyway).
+
+In the GUI, an "Ingest from" input appears below the library-root field; filling it switches the Dry Run button to "Ingest (Dry Run)".
+
 ### With the web GUI
 
 ```bash
@@ -73,6 +93,7 @@ node gui.mjs [--port 7000] [--no-open]
 - **Best-guess resolution** — accept the suggested destination, use `_NeedsReview/`, or pick a custom path with a directory browser
 - **Duplicate resolution** — side-by-side file comparison (size, bitrate, duration, codec, ID3 tags) with an auto-recommendation; confirm which copy to keep and a plan item is added automatically (move or delete, depending on your duplicates folder setting)
 - **Group duplicate resolution** — for folders containing both a single combined audiobook file and individual chapter files, choose which version to keep; the discarded files are queued for move or deletion
+- **Ingestion mode** — fill in the "Ingest from" field to scan a staging folder and plan moves into your library; conflicts (books that already exist) are surfaced in an "Ingestion Conflicts" section with Keep New / Keep Existing / Not a conflict buttons
 - **Execute options** — checkboxes for all execute flags; the GUI remembers which flags you had active
 
 All plan changes write back to `plan.json` immediately. The CLI and GUI can be used together — the CLI respects `approved`/`skipped` statuses set by the GUI.
@@ -92,6 +113,7 @@ Starts both the API server (nodemon, port 7000) and Vite dev server (port 5173) 
 | Flag | Effect |
 |---|---|
 | `--root <path>` | Path to Audiobooks root (default: `$AUDIOBOOKS_ROOT` or `/mnt/user/Audiobooks`) |
+| `--ingest <path>` | Ingest from this folder into `--root` instead of scanning `--root` directly. The scanned folder is the source; `--root` is the destination library. Detects books that already exist in the library as conflicts. |
 | `--execute` | Apply all pending/approved moves from plan.json |
 | `--auto-accept-review` | Use best-guess destinations instead of `_NeedsReview/` |
 | `--delete-junk` | Delete system files, Mac metadata, empty dirs, download artifacts |
@@ -170,6 +192,11 @@ Paths matched by an ignore rule are left untouched and listed in the glossary Sk
 | Group duplicates (resolved, delete mode) | Left in place | Deleted |
 | Group duplicates (resolved, move mode) | → duplicates folder | → duplicates folder |
 | Group duplicates (unresolved) | Left in place (flagged) | Left in place (flagged) |
+| Ingest conflict (Keep New, move mode) | Library copy → dup folder; ingested → library | Same |
+| Ingest conflict (Keep New, delete mode) | Library copy left in place (junk-pending) | Library copy deleted; ingested → library |
+| Ingest conflict (Keep Existing) | Ingested file stays in ingest folder | Same |
+| Ingest conflict (Not a conflict) | Ingested → library (move performed) | Same |
+| Ingest conflict (unresolved) | Ingested file stays in ingest folder (flagged) | Same |
 | Ignore-matched paths | Always left in place | Always left in place |
 | `._*.mp3` Mac resource forks | Left in place | Deleted (auto-detected as non-audio) |
 
@@ -182,6 +209,8 @@ Paths matched by an ignore rule are left untouched and listed in the glossary Sk
 **Resolve duplicates** — use the GUI's Duplicates section to compare files and mark which to keep. The discarded file is moved to the duplicates folder (if configured) or queued for deletion (requires `--delete-junk` at execute time). Configure the folder in the GUI's Options panel or via `--duplicates-folder` at dry-run time.
 
 **Resolve group duplicates** — the GUI's Group Duplicates section shows folders containing both a combined audiobook file and individual chapter files. Choose which version to keep; the discarded files are moved or queued for deletion on the next execute.
+
+**Resolve ingestion conflicts** — when ingesting new books with `--ingest`, the GUI's Ingestion Conflicts section lists books that already exist in the library (by destination path OR matching ID3 artist+album). Pick Keep New to replace the library copy, Keep Existing to leave the ingestion source untouched, or Not a conflict to perform the move as if no conflict existed. Unresolved conflicts block their corresponding move at execute time.
 
 **Rescan Audiobookshelf** — Settings → Libraries → (your library) → Scan Library.
 
@@ -284,8 +313,9 @@ The file ships with several example entries. If the file is missing, the scanner
 | `src/core/metadata.mjs` | `readTags`, `recommendDuplicate`, `searchOpenLibrary` (legacy) |
 | `src/providers/` | Metadata provider system — `BaseProvider`, four provider implementations, `MetadataResolver` |
 | `src/core/plan.mjs` | `createPlanState`, `writePlan` (atomic), `buildPlanOutput`, `writeGlossary` |
-| `src/core/scanner.mjs` | `runDryScan` — three-pass scan, rule runner, classifier helpers |
-| `src/core/executor.mjs` | `runExecute` — processes plan items, writes execute.log |
+| `src/core/scanner.mjs` | `runDryScan` — three-pass scan, rule runner, classifier helpers; ingest-mode conflict wrapping |
+| `src/core/executor.mjs` | `runExecute` — processes plan items, writes execute.log; accepts ingest `sourceRoot` |
+| `src/core/library-index.mjs` | `buildLibraryIndex` — ingest-mode content index (artist+album → file paths) |
 | `src/core/user-mappings.mjs` | Loads `user-mappings.json` from project root |
 | `src/rules/BaseRule.mjs` | Abstract base class for scan rules |
 | `src/rules/loader.mjs` | Auto-discovers and loads all rule files |

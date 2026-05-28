@@ -19,6 +19,7 @@ export function createPlanState() {
   const lookupLog       = [];
   const duplicates      = [];
   const groupDuplicates = [];
+  const conflicts       = [];
   const skipLog         = [];
 
   function _addItem(obj) {
@@ -61,6 +62,25 @@ export function createPlanState() {
   function addDuplicate(f1, f2, note, meta = {}) { duplicates.push({ f1, f2, note, ...meta }); }
   function addLookup(obj) { lookupLog.push(obj); }
 
+  // Ingestion conflict: a source from the ingestion folder collides with the
+  // library either by destination-path collision (matchType: 'path') or by
+  // ID3 content match (matchType: 'content'). The user resolves these in the
+  // GUI; resolution synthesizes the actual move (or no-op skip).
+  function addConflict({ source, dest, reason = '', notes = '', matchType, libraryFile, sourceMeta, libraryMeta, recommendation }) {
+    conflicts.push({
+      source, dest,
+      intendedReason: reason,
+      intendedNotes: notes,
+      matchType,           // 'path' | 'content'
+      libraryFile,
+      sourceMeta: sourceMeta || null,
+      libraryMeta: libraryMeta || null,
+      recommendation: recommendation ?? null,
+      resolution: null,
+      dismissed: false,
+    });
+  }
+
   // groupA / groupB: { files: string[], totalSize: number, description: string }
   function addGroupDuplicate(groupA, groupB, note, opts = {}) {
     groupDuplicates.push({
@@ -73,13 +93,13 @@ export function createPlanState() {
   }
 
   return {
-    planItems, lookupLog, duplicates, groupDuplicates, skipLog,
+    planItems, lookupLog, duplicates, groupDuplicates, conflicts, skipLog,
     addMove, addJunkMove, addJunkDelete, addBestGuess,
-    addSkip, addDuplicate, addGroupDuplicate, addLookup,
+    addSkip, addDuplicate, addGroupDuplicate, addConflict, addLookup,
   };
 }
 
-export function buildPlanOutput({ planItems, lookupLog, duplicates, groupDuplicates, skipLog, ignoreFile, settings }) {
+export function buildPlanOutput({ planItems, lookupLog, duplicates, groupDuplicates, conflicts, skipLog, ignoreFile, settings }) {
   return {
     generatedAt: new Date().toISOString(),
     ignoreFile,
@@ -88,6 +108,7 @@ export function buildPlanOutput({ planItems, lookupLog, duplicates, groupDuplica
     lookupLog,
     duplicates,
     groupDuplicates: groupDuplicates || [],
+    conflicts: conflicts || [],
     skipLog,
   };
 }

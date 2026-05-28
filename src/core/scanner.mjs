@@ -11,13 +11,18 @@ import { createPlanState, buildPlanOutput, writePlan, writeGlossary } from './pl
 import { loadUserMappings } from './user-mappings.mjs';
 import { loadRules } from '../rules/loader.mjs';
 import { cleanBookTitle } from './title-utils.mjs';
+import { buildLibraryIndex } from './library-index.mjs';
 
 // ============================================================
 // SCAN IMPLEMENTATION
 // ============================================================
 
-export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ignoreFilePath, duplicatesFolder, scope } = {}) {
-  console.log('=== DRY-RUN: Scanning audiobooks directory ===\n');
+export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ignoreFilePath, duplicatesFolder, scope, destRoot } = {}) {
+  const isIngest = !!destRoot && path.resolve(destRoot) !== path.resolve(root);
+  destRoot = destRoot ? path.resolve(destRoot) : root;
+  console.log(isIngest
+    ? `=== INGEST DRY-RUN ===\n  Source: ${root}\n  Library: ${destRoot}\n`
+    : '=== DRY-RUN: Scanning audiobooks directory ===\n');
   if (scope) console.log(`Scope filter: only top-level dirs containing "${scope}"\n`);
 
   const ignoreRules = loadIgnoreFile(ignoreFilePath);
@@ -32,21 +37,94 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     console.log(`Loaded ${rules.length} scan rule(s): ${rules.map(r => r.name).join(', ')}\n`);
 
   const state = createPlanState();
-  const { planItems, lookupLog, duplicates, groupDuplicates, skipLog } = state;
-  const { addMove, addJunkMove, addJunkDelete, addBestGuess, addSkip, addDuplicate, addGroupDuplicate, addLookup } = state;
+  const { planItems, lookupLog, duplicates, groupDuplicates, conflicts, skipLog } = state;
+  let { addMove, addJunkMove, addJunkDelete, addBestGuess } = state;
+  const { addSkip, addDuplicate, addGroupDuplicate, addConflict, addLookup } = state;
 
   const relPath = p => path.relative(root, p);
   const checkIgnore = (p, isDir) => matchedIgnoreRule(relPath(p), isDir, ignoreRules);
+
+  // In ingest mode (destRoot differs from source root), pre-build a content
+  // index of the destination library so we can detect "this book already
+  // exists" conflicts in addition to path collisions.
+  let libraryIndex = null;
+  if (isIngest) {
+    console.log(`[ingest] Building library index from ${destRoot}…`);
+    const t0 = Date.now();
+    libraryIndex = await buildLibraryIndex(destRoot);
+    console.log(`[ingest] Indexed ${libraryIndex.byContent.size} unique books in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
+  }
+
+  // Per-source ID3 metadata recorded by classifier helpers; used by the
+  // conflict-check wrapper to do synchronous content matching.
+  const sourceMetaByPath = new Map();
+  const recordSourceMeta = (p, meta) => {
+    if (!p || !meta) return;
+    const artist = (meta.artist || '').trim();
+    const album  = (meta.album  || '').trim();
+    if (!artist && !album) return;
+    sourceMetaByPath.set(p, { artist, album });
+  };
+
+  const checkConflict = (sourcePath, destPath) => {
+    if (!libraryIndex || !sourcePath || !destPath) return null;
+    if (statOf(destPath)) {
+      return { matchType: 'path', libraryFile: destPath };
+    }
+    // Look up content match by recorded ID3 metadata (best-effort).
+    let meta = sourceMetaByPath.get(sourcePath);
+    if (!meta) {
+      // For directory sources, check if any recorded child file points back to
+      // the same book.
+      const prefix = sourcePath + path.sep;
+      for (const [p, m] of sourceMetaByPath) {
+        if (p.startsWith(prefix)) { meta = m; break; }
+      }
+    }
+    if (!meta?.artist || !meta?.album) return null;
+    const key = `${meta.artist.toLowerCase()}|${meta.album.toLowerCase()}`;
+    const hits = libraryIndex.byContent.get(key);
+    if (!hits?.length) return null;
+    return { matchType: 'content', libraryFile: hits[0], sourceMeta: meta };
+  };
+
+  // In ingest mode, wrap addMove/addBestGuess to intercept conflicts and
+  // route them to the conflicts list instead of the normal items list.
+  if (isIngest) {
+    const origAddMove = addMove;
+    addMove = (source, dest, reason, notes = '', opts = {}) => {
+      const c = checkConflict(source, dest);
+      if (c) {
+        addConflict({ source, dest, reason, notes, ...c });
+        return;
+      }
+      return origAddMove(source, dest, reason, notes, opts);
+    };
+    const origAddBestGuess = addBestGuess;
+    addBestGuess = (source, bestDest, fallbackDest, reason, bestGuessNote, opts = {}) => {
+      // Only the "best" dest can collide with the library; fallback goes to
+      // _NeedsReview under destRoot and is always per-source-unique.
+      const c = bestDest ? checkConflict(source, bestDest) : null;
+      if (c) {
+        addConflict({ source, dest: bestDest, reason, notes: bestGuessNote, ...c });
+        return;
+      }
+      return origAddBestGuess(source, bestDest, fallbackDest, reason, bestGuessNote, opts);
+    };
+  }
 
   // ctx is built here — function declarations below (scanBookForJunk etc.) are hoisted
   const ctx = {
     addMove, addJunkMove, addJunkDelete, addBestGuess,
     addSkip, addDuplicate, addGroupDuplicate, addLookup,
-    root, relPath, checkIgnore,
+    root, destRoot,
+    destPath: (...segs) => path.join(destRoot, ...segs),
+    relPath, checkIgnore,
     listDir, statOf, isAudio, isSystemFile, isJunkFile,
     hasAudioRecursive, isDoubleNested,
     readTags, recommendDuplicate, searchOpenLibrary,
     resolveMetadata: (q) => metadataResolver.resolve(q),
+    recordSourceMeta,
     scanBookForJunk,
     // Set by processAuthorDir before iterating; rules can read to learn about
     // Author/Series/Book structure even before recursing.
@@ -91,7 +169,7 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     if (e.startsWith('.')) { addJunkDelete(p, 'hidden/system directory'); continue; }
 
     if (NON_AUDIOBOOK_DIRS.has(e)) {
-      addMove(p, path.join(root, '_non-audiobook', e), 'non-audiobook content');
+      addMove(p, path.join(destRoot, '_non-audiobook', e), 'non-audiobook content');
       continue;
     }
     if (knownMisplaced[e]) { await classifyMisplacedBookFolder(p, e, knownMisplaced[e]); continue; }
@@ -106,12 +184,20 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
   }
 
   // ---- Pass 3: empty directories -------------------------------------
-  console.log('\n[Pass 3] Scanning for empty directories...');
-  scanForEmptyDirs(root, 0);
+  // Skip in ingest mode — the source (ingestion) folder being empty after a
+  // move is desired, not a junk-cleanup target. The library scan handles its
+  // own empty-shell cleanup at execute time when --delete-empty-shells is set.
+  if (!isIngest) {
+    console.log('\n[Pass 3] Scanning for empty directories...');
+    scanForEmptyDirs(root, 0);
+  }
 
   // ---- Write outputs -------------------------------------------------
-  const settings = duplicatesFolder ? { duplicatesFolder } : {};
-  const plan = buildPlanOutput({ planItems, lookupLog, duplicates, groupDuplicates, skipLog, ignoreFile: ignoreFilePath, settings });
+  const settings = {
+    ...(duplicatesFolder ? { duplicatesFolder } : {}),
+    ...(isIngest ? { sourceRoot: root, destRoot } : {}),
+  };
+  const plan = buildPlanOutput({ planItems, lookupLog, duplicates, groupDuplicates, conflicts, skipLog, ignoreFile: ignoreFilePath, settings });
   writePlan(planFile, plan);
   console.log(`Plan    → ${planFile}`);
 
@@ -129,12 +215,14 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
   console.log(`  Junk MOVE→_misc_ : ${junkMove.length}  (download artifacts)`);
   console.log(`  Duplicates       : ${duplicates.length}`);
   console.log(`  Group duplicates : ${groupDuplicates.length}  (combined vs. chapters)`);
+  if (isIngest) console.log(`  Conflicts        : ${conflicts.length}  (existing library books)`);
   console.log(`  Skipped          : ${skipLog.length}  (ignore rules + hard-protected)`);
   console.log('\nReview REORGANIZATION_GLOSSARY.md, then run with --execute.');
 
   async function classifyRootMp3(filePath, filename) {
     const name = path.basename(filename, path.extname(filename));
     const tags = await readTags(filePath, true);
+    recordSourceMeta(filePath, tags);
     let author = tags.artist, bookTitle = tags.album || name;
     let method = 'id3-tags', confidence = author ? 'high' : 'none', ambiguous = false;
     let providerMatch = null;
@@ -168,14 +256,14 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
 
     const itemOpts = { ...(providerMatch ? { providerMatch } : {}), ...(warnings ? { warnings } : {}) };
     if (!author || ambiguous) {
-      addBestGuess(filePath, null, path.join(root, '_NeedsReview', filename),
+      addBestGuess(filePath, null, path.join(destRoot, '_NeedsReview', filename),
         'root-level MP3 — author unknown',
         ambiguous ? `Ambiguous: multiple results for "${name}"`
                   : `Could not identify author for "${name}"`,
         itemOpts);
       return;
     }
-    addMove(filePath, path.join(root, author, bookTitle, filename),
+    addMove(filePath, path.join(destRoot, author, bookTitle, filename),
       `root-level MP3 → ${author}/${bookTitle}/`,
       '', itemOpts);
   }
@@ -195,11 +283,11 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
       addLookup({ filename: dirName, method: 'known-mapping',
         result: `${author} / ${title || dirName}`, confidence: info.confidence, notes: info.note });
     }
-    const dest = series && title ? path.join(root, author, series, title)
-               : series          ? path.join(root, author, series)
-               : title           ? path.join(root, author, title)
-                                 : path.join(root, author, dirName);
-    addMove(dirPath, dest, `misplaced book folder → ${relPath(dest)}/`, info.note);
+    const dest = series && title ? path.join(destRoot, author, series, title)
+               : series          ? path.join(destRoot, author, series)
+               : title           ? path.join(destRoot, author, title)
+                                 : path.join(destRoot, author, dirName);
+    addMove(dirPath, dest, `misplaced book folder → ${path.relative(destRoot, dest)}/`, info.note);
   }
 
   async function classifyUnknownTopLevelBook(dirPath, dirName) {
@@ -208,7 +296,10 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     let fileDuration = null;
     let durationTimedOut = false;
     if (af) {
-      const tags = await readTags(path.join(dirPath, af), true);
+      const afPath = path.join(dirPath, af);
+      const tags = await readTags(afPath, true);
+      recordSourceMeta(afPath, tags);
+      recordSourceMeta(dirPath, tags);
       author = tags.artist;
       if (tags.album) bookTitle = tags.album;
       fileDuration = tags.duration;
@@ -244,7 +335,7 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
         : `Top-level dir with ${listDir(dirPath).filter(isAudio).length} audio files at root`,
     });
 
-    const fallback = path.join(root, '_NeedsReview', dirName);
+    const fallback = path.join(destRoot, '_NeedsReview', dirName);
     const itemOpts = { ...(providerMatch ? { providerMatch } : {}), ...(warnings ? { warnings } : {}) };
     if (!author || ambiguous) {
       addBestGuess(dirPath, null, fallback, 'unknown top-level book dir — author unresolved',
@@ -252,7 +343,7 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
         itemOpts);
       return;
     }
-    addMove(dirPath, path.join(root, author, bookTitle),
+    addMove(dirPath, path.join(destRoot, author, bookTitle),
       `unknown top-level book dir → ${author}/${bookTitle}/`,
       '', itemOpts);
   }
@@ -407,6 +498,7 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
   async function processLooseAudioInSeries(filePath, filename, seriesName, authorName, authorPath) {
     const name = path.basename(filename, path.extname(filename));
     const tags = await readTags(filePath);
+    recordSourceMeta(filePath, tags);
     const bookTitle = tags.album || name;
     addLookup({
       filename, method: 'id3-tags',
@@ -414,16 +506,20 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
       confidence: tags.album ? 'high' : 'medium',
       notes: `Loose audio inside series container; album="${tags.album || '(not set)'}"`,
     });
-    addMove(filePath, path.join(authorPath, seriesName, bookTitle, filename),
+    addMove(filePath, ctx.destPath(authorName, seriesName, bookTitle, filename),
       `loose audio → ${authorName}/${seriesName}/${bookTitle}/`);
   }
 
   async function processLooseAudio(filePath, filename, authorName, authorPath) {
     const name = path.basename(filename, path.extname(filename));
     const tags = await readTags(filePath);
+    recordSourceMeta(filePath, tags);
     const bookTitle = tags.album || name;
 
-    const existDir = [path.join(authorPath, bookTitle), path.join(authorPath, name)]
+    // Look for an existing destination subfolder (in the library, not the
+    // source). In normal mode destRoot === root so this is unchanged.
+    const destAuthorDir = ctx.destPath(authorName);
+    const existDir = [path.join(destAuthorDir, bookTitle), path.join(destAuthorDir, name)]
       .find(d => statOf(d)?.isDirectory());
 
     if (existDir) {
@@ -451,7 +547,7 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
     addLookup({ filename, method: 'id3-tags', result: `${authorName} / ${bookTitle}`,
       confidence: tags.album ? 'high' : 'medium',
       notes: `New subfolder; album="${tags.album || '(not set)'}"` });
-    addMove(filePath, path.join(authorPath, bookTitle, filename),
+    addMove(filePath, ctx.destPath(authorName, bookTitle, filename),
       `loose audio → new ${authorName}/${bookTitle}/`);
   }
 
@@ -464,7 +560,7 @@ export async function runDryScan(root, { planFile, glossaryPath, ignoreFile: ign
 
     if (isDoubleNested(bookPath)) {
       const inner = path.join(bookPath, bookName);
-      addMove(inner, path.join(authorPath, bookName + '__unwrapped'),
+      addMove(inner, ctx.destPath(authorName, bookName + '__unwrapped'),
         `collapsed double-nested dir in ${authorName}/`,
         `Outer shell "${bookName}" will be empty — use --delete-empty-shells`);
       scanBookForJunk(bookPath, bookName, authorName, false);

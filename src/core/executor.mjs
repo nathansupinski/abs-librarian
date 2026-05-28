@@ -5,6 +5,7 @@ import { listDir, statOf, safeMove, deleteItem, cleanEmptyShells } from './fs-ut
 import { readPlan, writePlan } from './plan.mjs';
 
 export async function runExecute(planFile, executeLog, root, {
+  sourceRoot = null,
   autoAcceptReview = false,
   deleteJunk = false,
   deleteEmptyShells = false,
@@ -12,6 +13,7 @@ export async function runExecute(planFile, executeLog, root, {
   retryFailed = false,
 } = {}) {
   console.log('=== EXECUTE MODE ===');
+  if (sourceRoot) console.log(`  --ingest source          : ${sourceRoot}`);
   console.log(`  --auto-accept-review     : ${autoAcceptReview}`);
   console.log(`  --delete-junk            : ${deleteJunk}`);
   console.log(`  --delete-empty-shells    : ${deleteEmptyShells}`);
@@ -21,6 +23,10 @@ export async function runExecute(planFile, executeLog, root, {
   if (!statOf(planFile)) { console.error('No plan.json — run dry-run first.'); process.exit(1); }
 
   const plan = readPlan(planFile);
+  // Fall back to plan.settings if caller didn't pass sourceRoot
+  if (!sourceRoot && plan.settings?.sourceRoot) sourceRoot = plan.settings.sourceRoot;
+  // In ingest mode, sources live outside `root` — widen the safety check.
+  const allowedRoots = sourceRoot && sourceRoot !== root ? [root, sourceRoot] : root;
 
   const toProcess = plan.items.filter(i =>
     i.status === 'pending' || i.status === 'approved' ||
@@ -67,7 +73,7 @@ export async function runExecute(planFile, executeLog, root, {
     if (item.junk) {
       if (deleteJunk) {
         try {
-          deleteItem(item.source, root, forceDeleteAudioJunk);
+          deleteItem(item.source, allowedRoots, forceDeleteAudioJunk);
           logExec(`DONE   deleted  ${relPath(item.source)}`);
           item.status = 'done'; delete item.error; done++;
         } catch (e) {
@@ -76,7 +82,7 @@ export async function runExecute(planFile, executeLog, root, {
         }
       } else if (item.action === 'move' && dest) {
         try {
-          const r = safeMove(item.source, dest, root);
+          const r = safeMove(item.source, dest, allowedRoots);
           if (r === 'SKIP_EXISTS') {
             logExec(`SKIP   exists   ${relPath(dest)}`);
             item.status = 'skipped'; skipped++;
@@ -103,7 +109,7 @@ export async function runExecute(planFile, executeLog, root, {
     }
 
     try {
-      const r = safeMove(item.source, dest, root);
+      const r = safeMove(item.source, dest, allowedRoots);
       if (r === 'SKIP_EXISTS') {
         logExec(`SKIP   exists   ${relPath(dest)}`);
         item.status = 'skipped'; skipped++;

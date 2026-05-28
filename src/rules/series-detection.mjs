@@ -164,7 +164,12 @@ export default class SeriesDetectionRule extends ScanRule {
       let durationTimedOut = false;
       const audioFiles = ctx.listDir(bookPath).filter(ctx.isAudio);
       if (audioFiles.length === 1) {
-        const tags = await ctx.readTags(path.join(bookPath, audioFiles[0]), true);
+        const afPath = path.join(bookPath, audioFiles[0]);
+        const tags = await ctx.readTags(afPath, true);
+        if (ctx.recordSourceMeta) {
+          ctx.recordSourceMeta(afPath, tags);
+          ctx.recordSourceMeta(bookPath, tags);
+        }
         duration = tags.duration ?? null;
         durationTimedOut = tags._durationTimedOut ?? false;
       }
@@ -246,7 +251,7 @@ export default class SeriesDetectionRule extends ScanRule {
 
     const { series, sequence, title, source, confidence, providerMatch, groupSize, durationTimedOut } = pre;
     const seqStr = sequence ? `${sequence} - ` : '';
-    const dest   = path.join(authorPath, series, `${seqStr}${title}`);
+    const dest   = ctx.destPath(authorName, series, `${seqStr}${title}`);
 
     const opts = { series: { name: series, sequence } };
     if (providerMatch) opts.providerMatch = providerMatch;
@@ -273,7 +278,7 @@ export default class SeriesDetectionRule extends ScanRule {
       ctx.addMove(bookPath, dest, `Series detected: ${seriesLabel}`, '', opts);
     } else {
       ctx.addBestGuess(bookPath, dest,
-        path.join(authorPath, '_NeedsReview', bookName),
+        ctx.destPath(authorName, '_NeedsReview', bookName),
         `Series detected: ${seriesLabel}`,
         noteParts.join('; ') || `Detected via ${source}`,
         opts);

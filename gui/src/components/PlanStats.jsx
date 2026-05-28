@@ -13,6 +13,7 @@ export default function PlanStats({ plan }) {
   const skipped   = items.filter(i => i.status === 'skipped').length;
   const bestGuess = items.filter(i => i.bestGuess && i.status !== 'skipped').length;
   const dupes     = (plan.duplicates || []).filter(d => !d.resolution).length;
+  const conflicts = (plan.conflicts || []).filter(c => !c.resolution && !c.dismissed).length;
 
   const stat = (label, value, color) => (
     <div className="flex items-center gap-2">
@@ -40,6 +41,10 @@ export default function PlanStats({ plan }) {
         {dupes > 0 && <>
           <span style={{ color: 'var(--color-border)' }}>·</span>
           {stat('dupes unresolved', dupes, 'var(--color-danger)')}
+        </>}
+        {conflicts > 0 && <>
+          <span style={{ color: 'var(--color-border)' }}>·</span>
+          {stat('conflicts unresolved', conflicts, 'var(--color-danger)')}
         </>}
       </div>
       <button

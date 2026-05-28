@@ -24,7 +24,7 @@ export default class SeriesCodeFormatRule extends ScanRule {
     if (ar) {
       ctx.addMove(
         bookPath,
-        path.join(authorPath, 'Agatha Raisin', `${ar.num} - ${ar.title}`),
+        ctx.destPath(authorName, 'Agatha Raisin', `${ar.num} - ${ar.title}`),
         `${authorName} → Agatha Raisin/${ar.num} - ${ar.title}/`
       );
       ctx.addLookup({
@@ -39,11 +39,11 @@ export default class SeriesCodeFormatRule extends ScanRule {
     // --- Pattern 2: "M C Beaton - AR##/HM## Title [NofM]" ---
     const mcb = parseMCBeaton(bookName);
     if (mcb) {
-      const bookDest = path.join(authorPath, mcb.series, `${mcb.num} - ${mcb.title}`);
+      const bookDest = ctx.destPath(authorName, mcb.series, `${mcb.num} - ${mcb.title}`);
       if (mcb.disc !== null) {
         const discDest = path.join(bookDest, `Disc ${mcb.disc}`);
         const note = `Disc ${mcb.disc}${mcb.totalDiscs ? ' of ' + mcb.totalDiscs : ''} for "${mcb.title}". Book may be incomplete.`;
-        ctx.addBestGuess(bookPath, discDest, path.join(ctx.root, '_NeedsReview', bookName),
+        ctx.addBestGuess(bookPath, discDest, ctx.destPath('_NeedsReview', bookName),
           `${authorName} partial disc → ${mcb.series}/${mcb.num} - ${mcb.title}/Disc ${mcb.disc}/`, note);
         ctx.addLookup({
           filename: bookName, method: 'filename-parse',
@@ -73,8 +73,8 @@ export default class SeriesCodeFormatRule extends ScanRule {
       }
       ctx.addBestGuess(
         bookPath,
-        path.join(authorPath, guessTitle, `Disc ${discInfo.disc}`),
-        path.join(ctx.root, '_NeedsReview', bookName),
+        ctx.destPath(authorName, guessTitle, `Disc ${discInfo.disc}`),
+        ctx.destPath('_NeedsReview', bookName),
         `${authorName} disc folder — partially parsed`,
         `Disc ${discInfo.disc} of ${discInfo.totalDiscs}. Guessed title: "${guessTitle}".`
       );

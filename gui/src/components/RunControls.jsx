@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Square, Terminal, ChevronDown, ChevronUp, Loader2, FolderOpen } from 'lucide-react';
+import { Play, Square, Terminal, ChevronDown, ChevronUp, Loader2, FolderOpen, FolderInput } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { usePlan, useUpdateSettings } from '../hooks/usePlan.js';
+import { usePlan, useUpdateSettings, useStartIngest } from '../hooks/usePlan.js';
 import FolderBrowser from './FolderBrowser.jsx';
 
 const FLAG_DEFS = [
@@ -16,6 +16,7 @@ export default function RunControls({ noPlan = false, initialRoot = '' }) {
   const qc = useQueryClient();
   const { data: plan } = usePlan();
   const updateSettings = useUpdateSettings();
+  const startIngest    = useStartIngest();
   const [running, setRunning]         = useState(false);
   const [runType, setRunType]         = useState(null);
   const [exitCode, setExitCode]       = useState(null);
@@ -32,12 +33,23 @@ export default function RunControls({ noPlan = false, initialRoot = '' }) {
   const [dupFolderInput, setDupFolderInput] = useState('');
   const [rootInput, setRootInput]     = useState(initialRoot);
   const [showBrowser, setShowBrowser] = useState(false);
+  const [ingestInput, setIngestInput] = useState('');
+  const [showIngestBrowser, setShowIngestBrowser] = useState(false);
   const logRef  = useRef(null);
   const outputRef = useRef('');
 
   useEffect(() => {
     setDupFolderInput(plan?.settings?.duplicatesFolder ?? '');
   }, [plan?.settings?.duplicatesFolder]);
+
+  // When the plan was generated in ingest mode, prefill the ingestion input
+  // so re-running uses the same source by default.
+  useEffect(() => {
+    if (plan?.settings?.sourceRoot && !ingestInput) {
+      setIngestInput(plan.settings.sourceRoot);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan?.settings?.sourceRoot]);
 
   useEffect(() => {
     const es = new EventSource('/api/run/stream');
@@ -75,6 +87,13 @@ export default function RunControls({ noPlan = false, initialRoot = '' }) {
   }, [output]);
 
   const startDryRun = () => {
+    const ingest = ingestInput.trim();
+    if (ingest) {
+      // Ingest mode: scan ingestion folder, plan moves into library root.
+      if (!rootInput.trim()) return;
+      startIngest.mutate({ ingestionFolder: ingest, libraryRoot: rootInput.trim() });
+      return;
+    }
     const body = rootInput.trim() ? JSON.stringify({ root: rootInput.trim() }) : undefined;
     fetch('/api/run/dry-run', {
       method: 'POST',
@@ -153,20 +172,73 @@ export default function RunControls({ noPlan = false, initialRoot = '' }) {
         )}
       </div>
 
+      {/* Ingestion folder row — optional; enables ingest mode when filled */}
+      <div style={{
+        padding: '8px 16px',
+        borderBottom: '1px solid var(--color-border)',
+        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+        background: ingestInput.trim() ? 'color-mix(in srgb, var(--color-accent) 4%, transparent)' : 'transparent',
+      }}>
+        <span style={{ fontSize: 12, color: 'var(--color-muted)', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <FolderInput size={12} />
+          Ingest from:
+        </span>
+        <input
+          type="text"
+          value={ingestInput}
+          onChange={e => setIngestInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && !running && rootInput.trim() && startDryRun()}
+          placeholder="(optional) /path/to/incoming-books — leave blank for normal library scan"
+          style={{
+            flex: 1, minWidth: 280,
+            background: 'var(--color-surface)', border: '1px solid var(--color-border)',
+            borderRadius: 4, padding: '4px 10px', fontSize: 13,
+            color: 'var(--color-text)', fontFamily: 'monospace',
+          }}
+        />
+        <button
+          className="btn btn-ghost"
+          onClick={() => setShowIngestBrowser(true)}
+          title="Browse for ingestion folder"
+          style={{ padding: '3px 8px' }}
+        >
+          <FolderOpen size={13} />
+        </button>
+        {ingestInput.trim() && (
+          <button
+            className="btn btn-ghost"
+            onClick={() => setIngestInput('')}
+            title="Clear ingestion folder (return to normal library-scan mode)"
+            style={{ fontSize: 11, padding: '3px 8px' }}
+          >
+            Clear
+          </button>
+        )}
+        {showIngestBrowser && (
+          <FolderBrowser
+            initialPath={ingestInput.trim() || '/'}
+            onSelect={p => setIngestInput(p)}
+            onClose={() => setShowIngestBrowser(false)}
+          />
+        )}
+      </div>
+
       {/* Controls row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 16px' }}>
 
-        {/* Dry run */}
+        {/* Dry run / Ingest */}
         <button
           className="btn btn-primary"
           onClick={startDryRun}
-          disabled={running || (noPlan && !rootInput.trim())}
-          title="Regenerate plan.json from the audiobooks directory"
+          disabled={running || (!rootInput.trim() && (noPlan || ingestInput.trim()))}
+          title={ingestInput.trim()
+            ? 'Plan moves from the ingestion folder into the library root'
+            : 'Regenerate plan.json from the audiobooks directory'}
         >
-          {running && runType === 'dry-run'
+          {running && (runType === 'dry-run' || runType === 'ingest')
             ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
             : <Play size={12} />}
-          Dry Run
+          {ingestInput.trim() ? 'Ingest (Dry Run)' : 'Dry Run'}
         </button>
 
         {/* Execute */}
@@ -204,11 +276,11 @@ export default function RunControls({ noPlan = false, initialRoot = '' }) {
         {/* Running status */}
         {running ? (
           <span style={{ color: 'var(--color-warning)', fontSize: 12, marginLeft: 4 }}>
-            Running {runType}…
+            Running {runType === 'ingest' ? 'ingest dry-run' : runType}…
           </span>
         ) : exitCode != null ? (
           <span style={{ color: statusColor, fontSize: 12, marginLeft: 4 }}>
-            {runType} {exitCode === 0 ? 'completed' : `failed (exit ${exitCode})`}
+            {runType === 'ingest' ? 'ingest dry-run' : runType} {exitCode === 0 ? 'completed' : `failed (exit ${exitCode})`}
           </span>
         ) : null}
 
