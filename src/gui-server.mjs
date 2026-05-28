@@ -486,39 +486,81 @@ export function startServer(argv) {
 
   // ---- Filesystem listing -----------------------------------------------
 
+  // Filesystem browser endpoint. Intentionally unrestricted: this is a
+  // local UI for the user to pick a path. We only return directory entry
+  // names (never file contents) and the user is browsing their own machine.
+  // Move/delete operations have their own root-scoping safety in fs-utils.
   app.get('/api/fs/ls', (req, res) => {
     try {
       const reqPath = req.query.path;
       if (!reqPath) return res.status(400).json({ error: 'path query param required' });
 
-      // Safety: allow browsing within ROOT, plus the ingest-mode source/dest
-      // if a plan exists. Falsy entries are filtered out.
-      let planSettings = null;
-      try { planSettings = readPlan(PLAN_FILE)?.settings || null; } catch { /* no plan yet */ }
-      const allowedRoots = [
-        ROOT,
-        planSettings?.sourceRoot,
-        planSettings?.destRoot,
-      ].filter(Boolean);
       const resolved = path.resolve(reqPath);
-      if (allowedRoots.length > 0 && !allowedRoots.some(r => resolved === r || resolved.startsWith(r + path.sep))) {
-        return res.status(403).json({ error: 'Path outside allowed roots' });
+      const s = statOf(resolved);
+      if (!s) return res.status(404).json({ error: `Path not found: ${resolved}` });
+      if (!s.isDirectory()) return res.status(400).json({ error: `Not a directory: ${resolved}` });
+
+      let names;
+      try { names = fs.readdirSync(resolved); }
+      catch (e) {
+        if (e.code === 'EACCES' || e.code === 'EPERM') {
+          return res.status(403).json({ error: `Permission denied: ${resolved}` });
+        }
+        throw e;
       }
 
-      const entries = listDir(reqPath)
+      const entries = names
         .map(name => {
-          const full = path.join(reqPath, name);
-          const s = statOf(full);
-          return s ? { name, path: full, isDir: s.isDirectory() } : null;
+          const full = path.join(resolved, name);
+          const st = statOf(full);
+          return st ? { name, path: full, isDir: st.isDirectory() } : null;
         })
         .filter(Boolean)
         .sort((a, b) => {
           if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-          return a.name.localeCompare(b.name);
+          return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
         });
 
-      res.json({ entries });
+      const parent = path.dirname(resolved);
+      res.json({
+        path: resolved,
+        parent: parent === resolved ? null : parent,
+        entries,
+      });
     } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Shortcut suggestions for the folder browser sidebar. Includes the user's
+  // home dir, common mount roots, and any roots known from the current plan.
+  app.get('/api/fs/shortcuts', (_req, res) => {
+    const home = process.env.HOME || process.env.USERPROFILE || null;
+    let planSettings = null;
+    try { planSettings = readPlan(PLAN_FILE)?.settings || null; } catch { /* no plan yet */ }
+
+    const shortcuts = [];
+    const seen = new Set();
+    const push = (label, p, kind) => {
+      if (!p) return;
+      const resolved = path.resolve(p);
+      if (seen.has(resolved)) return;
+      if (!statOf(resolved)?.isDirectory()) return;
+      seen.add(resolved);
+      shortcuts.push({ label, path: resolved, kind });
+    };
+
+    if (ROOT)                    push('Library root',      ROOT,                       'plan');
+    if (planSettings?.sourceRoot && planSettings.sourceRoot !== ROOT)
+                                 push('Ingest source',     planSettings.sourceRoot,    'plan');
+    if (planSettings?.destRoot && planSettings.destRoot !== ROOT)
+                                 push('Plan destination',  planSettings.destRoot,      'plan');
+    if (home)                    push('Home',              home,                       'system');
+                                 push('Filesystem root',   '/',                        'system');
+                                 push('/mnt',              '/mnt',                     'system');
+                                 push('/mnt/user',         '/mnt/user',                'system');
+                                 push('/media',            '/media',                   'system');
+                                 push('/tmp',              '/tmp',                     'system');
+
+    res.json({ shortcuts });
   });
 
   // ---- Run controls -----------------------------------------------------

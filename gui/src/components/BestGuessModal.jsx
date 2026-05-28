@@ -1,36 +1,18 @@
-import React, { useState, useEffect } from 'react';
-import { FolderOpen, ChevronRight, X, Check } from 'lucide-react';
+import React, { useState } from 'react';
+import { FolderOpen, X, Check } from 'lucide-react';
 import { useUpdateItem } from '../hooks/usePlan.js';
+import FolderBrowser from './FolderBrowser.jsx';
 
 export default function BestGuessModal({ item, onClose }) {
   const [dest, setDest] = useState(item.dest || item.fallbackDest || '');
-  const [browsePath, setBrowsePath] = useState(null);
-  const [entries, setEntries] = useState([]);
-  const [loadingEntries, setLoadingEntries] = useState(false);
+  const [showBrowser, setShowBrowser] = useState(false);
   const update = useUpdateItem();
-
-  useEffect(() => {
-    if (browsePath === null) return;
-    setLoadingEntries(true);
-    fetch(`/api/fs/ls?path=${encodeURIComponent(browsePath)}`)
-      .then(r => r.json())
-      .then(data => setEntries(data.entries || []))
-      .catch(() => setEntries([]))
-      .finally(() => setLoadingEntries(false));
-  }, [browsePath]);
 
   const confirm = () => {
     update.mutate(
       { id: item.id, patch: { dest, bestGuess: false, status: 'approved' } },
       { onSuccess: onClose }
     );
-  };
-
-  const selectEntry = (entry) => {
-    if (entry.isDir) {
-      setBrowsePath(entry.path);
-      setDest(entry.path);
-    }
   };
 
   return (
@@ -75,8 +57,8 @@ export default function BestGuessModal({ item, onClose }) {
             />
             <button
               className="btn btn-ghost"
-              title="Browse from this path"
-              onClick={() => setBrowsePath(dest || '/')}
+              title="Browse for folder"
+              onClick={() => setShowBrowser(true)}
             >
               <FolderOpen size={14} />
             </button>
@@ -99,37 +81,12 @@ export default function BestGuessModal({ item, onClose }) {
           </div>
         </div>
 
-        {/* Directory browser */}
-        {browsePath !== null && (
-          <div style={{ flex: 1, overflow: 'auto', padding: '0 20px 12px', borderTop: '1px solid var(--color-border)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 0 6px', color: 'var(--color-muted)', fontSize: 11 }}>
-              <code style={{ fontSize: 11 }}>{browsePath}</code>
-            </div>
-            {loadingEntries ? (
-              <div style={{ color: 'var(--color-muted)', padding: '8px 0' }}>Loading...</div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                {entries.length === 0 && (
-                  <div style={{ color: 'var(--color-muted)', fontSize: 12 }}>Empty directory</div>
-                )}
-                {entries.map(e => (
-                  <button key={e.path}
-                    onClick={() => selectEntry(e)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px',
-                      background: 'transparent', border: 'none', borderRadius: 4,
-                      cursor: 'pointer', textAlign: 'left', color: e.isDir ? 'var(--color-accent-hover)' : 'var(--color-muted)',
-                    }}
-                    onMouseEnter={ev => ev.currentTarget.style.background = 'var(--color-surface-2)'}
-                    onMouseLeave={ev => ev.currentTarget.style.background = 'transparent'}
-                  >
-                    {e.isDir ? <FolderOpen size={13} /> : <ChevronRight size={13} />}
-                    <code style={{ fontSize: 12 }}>{e.name}</code>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+        {showBrowser && (
+          <FolderBrowser
+            initialPath={dest || '/'}
+            onSelect={p => setDest(p)}
+            onClose={() => setShowBrowser(false)}
+          />
         )}
 
         {/* Footer */}

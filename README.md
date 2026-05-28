@@ -17,17 +17,89 @@ Runs in two phases: **dry-run** (generates a plan you review) then **execute** (
 
 ## Prerequisites
 
-Node.js 18+ and npm:
-
-```bash
-npm install
-```
+- **Node.js 18+** and npm
+- A path to your Audiobookshelf library (a directory of authors/books)
 
 ---
 
-## Quickstart
+## Quickstart — GUI (recommended)
 
-### CLI only
+The web GUI is the easiest way to use abs-librarian. It lets you trigger scans, review every proposed move, resolve duplicates and conflicts side-by-side, and run the actual file operations — all from the browser.
+
+![abs-librarian GUI showing a generated plan with moves, best guesses, and duplicates](docs/abs-librarian-gui-example.png)
+
+```bash
+git clone https://github.com/nathansupinski/abs-librarian.git
+cd abs-librarian
+npm install                  # install server dependencies
+npm run build:gui            # one-time build of the React frontend
+npm run start:gui            # starts the server and opens http://localhost:7000
+```
+
+That's it. The browser will open automatically.
+
+In the GUI:
+
+1. Enter your **Library root** (e.g. `/mnt/user/Audiobooks`) and click **Dry Run**.
+2. Watch the live terminal log; when the scan finishes, the plan loads automatically.
+3. Review the sections:
+   - **Ingestion Conflicts** (ingest mode only) — books that already exist in the library
+   - **Best Guesses** — items the scanner wasn't fully confident about
+   - **Duplicates / Group Duplicates** — side-by-side comparison with a recommendation
+   - **Moves** — grouped by author → book → disc
+4. Approve or skip items (individually, in groups, or by shift-click range).
+5. Click **Execute** to apply the approved plan. Output streams live.
+
+The GUI writes every change back to `plan.json` immediately, so it's safe to close the tab and come back later — or to mix GUI review with CLI execution.
+
+### After the first run
+
+You only need to run `npm install` and `npm run build:gui` once (and again after a `git pull`). For day-to-day use just:
+
+```bash
+npm run start:gui
+```
+
+The server accepts a couple of flags:
+
+```bash
+node gui.mjs [--port 7000] [--no-open] [--root /path/to/Audiobooks]
+```
+
+`--root` is only used when no `plan.json` exists yet; once a plan is generated the library root is read from it.
+
+### Dev mode (hot reload)
+
+If you're hacking on the frontend:
+
+```bash
+npm run dev
+```
+
+This runs the API server (nodemon, port 7000) and the Vite dev server (port 5173) concurrently. Open `http://localhost:5173`.
+
+---
+
+## GUI features
+
+- **Dry Run / Execute buttons** — run scans and apply the plan from the browser; live output streams to a built-in terminal log
+- **Approve / skip** individual moves or entire groups (grouped by author → book → disc)
+- **Batch select** — shift-click a range, then approve or skip in one click
+- **Best-guess resolution** — accept the suggested destination, use `_NeedsReview/`, or pick a custom path with a directory browser
+- **Duplicate resolution** — side-by-side file comparison (size, bitrate, duration, codec, ID3 tags) with an auto-recommendation; confirm which copy to keep and a plan item is added automatically (move or delete, depending on your duplicates folder setting)
+- **Group duplicate resolution** — for folders containing both a single combined audiobook file and individual chapter files, choose which version to keep; the discarded files are queued for move or deletion
+- **Ingestion mode** — fill in the "Ingest from" field to scan a staging folder and plan moves into your library; conflicts (books that already exist) are surfaced in an "Ingestion Conflicts" section with Keep New / Keep Existing / Not a conflict buttons
+- **Execute options** — checkboxes for all execute flags; the GUI remembers which flags you had active
+
+The CLI and GUI can be used together — the CLI respects `approved`/`skipped` statuses set by the GUI.
+
+---
+
+## CLI usage
+
+If you prefer the command line (or want to run abs-librarian as part of a script), the same workflow is available without the GUI.
+
+### Basic two-phase run
 
 ```bash
 # 1. Generate the plan (no files touched)
@@ -40,7 +112,7 @@ cat /path/to/Audiobooks/REORGANIZATION_GLOSSARY.md
 node reorganize.mjs --root /path/to/Audiobooks --execute
 ```
 
-You can set `AUDIOBOOKS_ROOT` to avoid repeating the path:
+Set `AUDIOBOOKS_ROOT` to avoid repeating the path:
 
 ```bash
 export AUDIOBOOKS_ROOT=/mnt/user/Audiobooks
@@ -48,63 +120,42 @@ node reorganize.mjs          # dry-run
 node reorganize.mjs --execute
 ```
 
-### Ingest mode — moving new books into an existing library
+Or use the npm script aliases:
 
-If you keep new arrivals in a staging folder and want to merge them into your library, use `--ingest`:
+```bash
+npm run dry-run -- --root /path/to/Audiobooks
+npm run execute -- --root /path/to/Audiobooks
+```
+
+The CLI generates the same `plan.json` the GUI reads, so you can mix-and-match: dry-run from the CLI, review/approve in the GUI, execute from either side.
+
+---
+
+## Ingest mode — moving new books into an existing library
+
+If you keep new arrivals in a staging folder and want to merge them into your library, use ingest mode. abs-librarian will scan the staging folder, plan moves into your library, and surface any books that already exist as **conflicts** (path collision or matching ID3 artist+album).
+
+### In the GUI
+
+Fill in the **Ingest from** field below the library-root input. The "Dry Run" button label flips to "Ingest (Dry Run)". Conflicts appear in a dedicated "Ingestion Conflicts" section at the top of the plan; resolve each one before executing.
+
+### From the CLI
 
 ```bash
 # 1. Scan the staging folder; plan moves into the library
 node reorganize.mjs --root /path/to/Audiobooks --ingest /path/to/Incoming
 
-# 2. Review the plan (the GUI shows an "Ingestion Conflicts" section for
-#    books that already exist in the library — path collision or matching
-#    ID3 artist+album)
+# 2. Review the plan (open the GUI to resolve any conflicts side-by-side)
 
 # 3. Execute (same command as normal — sourceRoot is read from plan.json)
 node reorganize.mjs --root /path/to/Audiobooks --execute
 ```
 
-Conflicts are resolved in the GUI: **Keep New** (replace library copy; the old file moves to your duplicates folder if set, else deletes with `--delete-junk`), **Keep Existing** (ingested file stays where it is), or **Not a conflict** (perform the move anyway).
+Conflict resolution options (in the GUI):
 
-In the GUI, an "Ingest from" input appears below the library-root field; filling it switches the Dry Run button to "Ingest (Dry Run)".
-
-### With the web GUI
-
-```bash
-npm run build:gui             # one-time build (or after pulling changes)
-node gui.mjs                  # opens http://localhost:7000
-```
-
-The GUI lets you review, approve, and customize the plan interactively, and has buttons to trigger dry-run and execute directly from the browser.
-
----
-
-## Web GUI
-
-```bash
-node gui.mjs [--port 7000] [--no-open]
-```
-
-**Features:**
-
-- **Dry Run / Execute buttons** — run scans and apply the plan from the browser; live output streams to a built-in terminal log
-- **Approve / skip** individual moves or entire groups (grouped by author → book → disc)
-- **Batch select** — shift-click a range, then approve or skip in one click
-- **Best-guess resolution** — accept the suggested destination, use `_NeedsReview/`, or pick a custom path with a directory browser
-- **Duplicate resolution** — side-by-side file comparison (size, bitrate, duration, codec, ID3 tags) with an auto-recommendation; confirm which copy to keep and a plan item is added automatically (move or delete, depending on your duplicates folder setting)
-- **Group duplicate resolution** — for folders containing both a single combined audiobook file and individual chapter files, choose which version to keep; the discarded files are queued for move or deletion
-- **Ingestion mode** — fill in the "Ingest from" field to scan a staging folder and plan moves into your library; conflicts (books that already exist) are surfaced in an "Ingestion Conflicts" section with Keep New / Keep Existing / Not a conflict buttons
-- **Execute options** — checkboxes for all execute flags; the GUI remembers which flags you had active
-
-All plan changes write back to `plan.json` immediately. The CLI and GUI can be used together — the CLI respects `approved`/`skipped` statuses set by the GUI.
-
-**Dev mode (hot reload):**
-
-```bash
-npm run dev
-```
-
-Starts both the API server (nodemon, port 7000) and Vite dev server (port 5173) concurrently. Open `http://localhost:5173`.
+- **Keep New** — replace library copy; the old file moves to your duplicates folder if set, else deletes with `--delete-junk`
+- **Keep Existing** — ingested file stays in the staging folder; no move performed
+- **Not a conflict** — perform the move as if no conflict existed
 
 ---
 
